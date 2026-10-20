@@ -1,0 +1,44 @@
+# copy to ignored config.toml and set FOSSA_CONFIG to its absolute path.
+# replace placeholders before use; operator commands can sign and broadcast.
+
+[solana]
+rpc_url = "https://rpc.example.com"
+usdc_mint = "REPLACE_WITH_PAYMENT_MINT"
+
+[marketplace]
+program_id = "REPLACE_WITH_PROGRAM_PUBLIC_KEY"
+market = "REPLACE_WITH_MARKET_PUBLIC_KEY"
+
+[server]
+api_url = "https://api.example.com"
+
+[redis]
+url = "redis://127.0.0.1:6379/"
+namespace = "REPLACE_WITH_OPERATOR_NAMESPACE"
+
+[security]
+encryption_key = "REPLACE_WITH_64_HEX_CHARACTERS"
+
+[provider]
+name = "Example Provider"
+description = "Inference provider"
+public_url = "https://provider.example.com/v1/chat/completions"
+wallet = "REPLACE_WITH_PROVIDER_PUBLIC_KEY"
+speed_tps = 100
+capacity = 4
+model_book_limit = 16
+bond_target_atomic = 1000000
+
+[[provider.models]]
+id = "example/model"
+name = "Example Model"
+context_tokens = 32768
+max_input_bound = 32768
+output_tokens = 4096
+input = ["text"]
+effort = ["none", "high"]
+temperature = 1.0
+top_p = 1.0
+input_rate = 1000000
+cached_rate = 500000
+output_rate = 2000000

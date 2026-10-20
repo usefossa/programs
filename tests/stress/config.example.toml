@@ -1,0 +1,10 @@
+# copy to ignored config.toml and set FOSSA_CONFIG for receipt benchmarks.
+
+[receipt_benchmark]
+requests_per_day = 10000
+epoch_seconds = 900
+settlement_seconds = [1, 10, 30, 300]
+offer_counts = [1, 32, 4096]
+samples = 10000
+scale_samples = 64
+illustrative_sol_usd = 100.0
