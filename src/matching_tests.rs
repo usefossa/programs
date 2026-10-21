@@ -80,7 +80,7 @@ fn matcher_fixture(speeds: &[u16]) -> (Vec<u8>, Vec<u8>, [u8; 107]) {
     for (slot, speed) in speeds.iter().enumerate() {
         let ti = HEADER_LEN + slot * TERMS_LEN;
         let ci = HEADER_LEN + slot * CAPACITY_LEN;
-        t[ti..ti + 32].fill(slot as u8 + 1);
+        t[ti..ti + 32].fill((slot % 255 + 1) as u8);
         for offset in [96, 100, 104] {
             wr32(&mut t, ti + offset, (slot as u32 + 1) * 1_000_000);
         }
@@ -292,4 +292,21 @@ fn fee_matches_wide_integer_ceil_at_boundaries_and_random_products() {
             (u128::from(n) * u128::from(rate)).div_ceil(1_000_000)
         );
     }
+}
+
+#[test]
+fn maximum_book_scan_ignores_unregistered_tail_and_rejects_oversized_count() {
+    let (mut terms, mut capacity, payload) = matcher_fixture(&vec![100; MAX_ENTRIES + 1]);
+    wr32(&mut terms, 44, MAX_ENTRIES as u32);
+    wr32(&mut capacity, 44, MAX_ENTRIES as u32);
+    let request = Request::parse(&payload, u64::MAX).unwrap();
+    for slot in 0..MAX_ENTRIES - 1 {
+        terms[HEADER_LEN + slot * TERMS_LEN + 111] = 0;
+    }
+    assert_eq!(select(&terms, &capacity, &request).unwrap().slot, MAX_ENTRIES as u32 - 1);
+    terms[HEADER_LEN + (MAX_ENTRIES - 1) * TERMS_LEN + 111] = 0;
+    assert!(select(&terms, &capacity, &request).is_err());
+    wr32(&mut terms, 44, MAX_ENTRIES as u32 + 1);
+    wr32(&mut capacity, 44, MAX_ENTRIES as u32 + 1);
+    assert!(select(&terms, &capacity, &request).is_err());
 }

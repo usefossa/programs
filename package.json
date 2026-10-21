@@ -1,0 +1,10 @@
+{
+  "name": "fossa-programs",
+  "private": true,
+  "scripts": {
+    "test": "cargo test --locked && bun run --cwd ops test",
+    "test:vm": "cargo build-sbf -- --locked && cargo test --locked --manifest-path tests/stress/Cargo.toml && cargo run --locked --manifest-path tests/vm/Cargo.toml",
+    "test:stress": "cargo build-sbf -- --locked && cargo run --release --locked --manifest-path tests/stress/Cargo.toml",
+    "bench:receipts": "cargo build-sbf --no-default-features --sbf-out-dir target/receipt-bench/baseline -- --locked && cargo build-sbf -- --locked && cargo run --release --locked --manifest-path tests/stress/Cargo.toml -- --receipt-bench"
+  }
+}

@@ -12,6 +12,8 @@ use solana_transaction::Transaction;
 #[path = "../../../src/abi.rs"]
 mod abi;
 use abi::*;
+#[path = "../../support/mod.rs"]
+mod support;
 mod metadata;
 mod receipt_bench;
 const TOKEN: Address = address!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -63,21 +65,9 @@ struct Vm {
 }
 impl Vm {
     fn new(legacy: bool) -> Self {
-        let mut svm = LiteSVM::new();
-        if legacy {
-            let path = std::env::var("LEGACY_TOKEN_SBF")
-                .expect("set LEGACY_TOKEN_SBF to a legacy spl-token SBF artifact");
-            svm.add_program(TOKEN, &std::fs::read(path).unwrap())
-                .unwrap();
-        }
+        let mut svm = support::svm(legacy);
         let program = key();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/deploy/inference_router_program.so");
-        let path = std::env::var("FOSSA_SBF")
-            .map(std::path::PathBuf::from)
-            .unwrap_or(path);
-        svm.add_program(program, &std::fs::read(path).unwrap())
-            .unwrap();
+        support::load_program(&mut svm, program);
         let payer = Keypair::new();
         svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
         Self {
@@ -916,6 +906,7 @@ fn base64(data: &[u8]) -> String {
     s
 }
 fn export() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let mut v = Vm::new(false);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/stress/genesis");
@@ -925,6 +916,7 @@ fn export() {
     std::fs::create_dir_all(&out).unwrap();
     let private = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/stress");
     std::fs::create_dir_all(&private).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut fs = vec![setup(&mut v, 4096, 7)];
     for seed in 20..52 {
@@ -992,6 +984,7 @@ fn export() {
     let meta = serde_json::json!({"program":v.program.to_string(),"admin":v.payer.pubkey().to_string(),"adminKey":v.payer.to_bytes().to_vec(),"models":models,"users":users,"payers":payers,"fixture":"mint/token/source allocations seeded; model initialization, all registration, funding, user initialization and deposits executed real SBF; zero outstanding bookings"});
     let path = private.join("metadata.json");
     std::fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     eprintln!(
         "export complete public genesis={} private metadata={}",

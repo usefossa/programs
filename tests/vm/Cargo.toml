@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+agave-feature-set = "=4.2.2"
 litesvm = "=0.16.0"
 solana-account = "4.3.0"
 solana-address = { version = "~2.6.1", features = ["curve25519"] }

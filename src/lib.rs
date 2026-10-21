@@ -1533,3 +1533,6 @@ mod tests {
 
 #[cfg(test)]
 mod matching_tests;
+
+#[cfg(test)]
+mod validation_tests;

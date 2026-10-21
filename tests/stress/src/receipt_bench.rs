@@ -9,9 +9,38 @@ const RECEIPT_LEN: usize = 120;
 const CLAIM_RECEIPT_OFFSET: usize = 37;
 
 fn prototype_path(root: &Path) -> PathBuf {
-    std::env::var_os("FOSSA_RECEIPT_PROTOTYPE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target/deploy/inference_router_program.so"))
+    root.join(std::env::var_os("FOSSA_RECEIPT_PROTOTYPE").or_else(|| std::env::var_os("FOSSA_SBF"))
+        .map(PathBuf::from).unwrap_or_else(|| "target/deploy/inference_router_program.so".into()))
+}
+
+fn baseline_path(root: &Path) -> PathBuf {
+    root.join(std::env::var_os("FOSSA_RECEIPT_BASELINE").map(PathBuf::from)
+        .unwrap_or_else(|| "target/receipt-bench/baseline/inference_router_program.so".into()))
+}
+
+#[derive(serde::Deserialize)]
+struct Bench {
+    requests_per_day: u64,
+    epoch_seconds: u32,
+    settlement_seconds: Vec<u64>,
+    offer_counts: Vec<usize>,
+    samples: usize,
+    scale_samples: usize,
+    illustrative_sol_usd: f64,
+}
+
+fn settings(raw: &str) -> Result<Bench, String> {
+    #[derive(serde::Deserialize)]
+    struct Config { receipt_benchmark: Bench }
+    let bench = toml::from_str::<Config>(raw).map_err(|error| error.to_string())?.receipt_benchmark;
+    if !(1..=1_000_000_000).contains(&bench.requests_per_day)
+        || !(1..=1800).contains(&bench.epoch_seconds)
+        || bench.offer_counts.is_empty() || bench.offer_counts.iter().any(|count| !(1..=4096).contains(count))
+        || !(4..=65_534).contains(&bench.samples) || !(4..=65_534).contains(&bench.scale_samples)
+        || bench.settlement_seconds.is_empty() || bench.settlement_seconds.iter().any(|delay| !(1..=86_400).contains(delay))
+        || !bench.illustrative_sol_usd.is_finite() || bench.illustrative_sol_usd < 0.0
+    { return Err("receipt benchmark settings exceed supported bounds".into()); }
+    Ok(bench)
 }
 
 #[cfg(test)]
@@ -54,6 +83,77 @@ mod tests {
     }
     fn close(v: &Vm, bucket: Address, recipient: Address, authority: Address) -> Instruction {
         ix(v.program, 27, &[], vec![w(bucket), w(recipient), s(authority)])
+    }
+
+    #[test]
+    fn benchmark_defaults_are_self_contained_and_invalid_bounds_fail_early() {
+        let raw = include_str!("../config.example.toml");
+        assert!(settings(raw).is_ok());
+        for (field, value) in [
+            ("epoch_seconds = 900", "epoch_seconds = 0"),
+            ("samples = 64", "samples = -1"),
+            ("samples = 64", "samples = 1"),
+            ("scale_samples = 8", "scale_samples = 0"),
+            ("offer_counts = [1, 32]", "offer_counts = [4097]"),
+            ("settlement_seconds = [1, 10, 30, 300]", "settlement_seconds = []"),
+            ("illustrative_sol_usd = 100.0", "illustrative_sol_usd = nan"),
+        ] {
+            assert!(settings(&raw.replace(field, value)).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn receipt_proofs_cover_frontier_boundaries_and_reject_tampering_and_replay() {
+        for legacy in [false, true] {
+            let (mut v, f, bucket) = fixture_for_token(legacy);
+            let booking = Keypair::new();
+            let mut receipts = Vec::new();
+            let mut leaves = Vec::new();
+            for index in 0..31 {
+                book_one(&mut v, &f, &booking, true, index == 0);
+                let claim = claim_one(&mut v, &f, booking.pubkey(), true, bucket.pubkey());
+                let receipt = receipt_from_log(&claim, bucket.pubkey(), START, index);
+                leaves.push(leaf(v.program, bucket.pubkey(), START, index, &receipt));
+                receipts.push(receipt);
+                let count = index as usize + 1;
+                if ![1, 2, 3, 4, 7, 8, 15, 16, 31].contains(&count) { continue; }
+                let original = v.svm.clone();
+                for target in [0, count / 2, count - 1] {
+                    v.svm = original.clone();
+                    let (valid, case) = dispute_ix(&v, &f, bucket.pubkey(), START, target, &receipts[target], &leaves);
+                    let mut forged = valid.clone();
+                    forged.data[16 + 96] ^= 1;
+                    execute(&mut v, &f.owner, &[forged], &[], false);
+                    if valid.data.len() > 16 + RECEIPT_LEN {
+                        let mut forged = valid.clone();
+                        *forged.data.last_mut().unwrap() ^= 1;
+                        execute(&mut v, &f.owner, &[forged], &[], false);
+                    }
+                    execute(&mut v, &f.owner, &[valid.clone()], &[], true);
+                    assert_eq!(rd64(&v.data(bucket.pubkey()), 216), count as u64 - 1);
+                    assert_eq!(rd64(&v.data(case), 160), rd64(&receipts[target], 104));
+                    execute(&mut v, &f.owner, &[valid], &[], false);
+                }
+                v.svm = original;
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_bucket_accepts_last_leaf_and_rejects_overflow_atomically() {
+        let (mut v, f, bucket) = fixture();
+        let booking = Keypair::new();
+        book_one(&mut v, &f, &booking, true, true);
+        let mut data = v.data(bucket.pubkey());
+        u64at(&mut data, 200, (1 << 16) - 2);
+        data[224..].fill(1);
+        v.put(bucket.pubkey(), v.program, data);
+        claim_one(&mut v, &f, booking.pubkey(), true, bucket.pubkey());
+        assert_eq!(rd64(&v.data(bucket.pubkey()), 200), (1 << 16) - 1);
+        book_one(&mut v, &f, &booking, true, false);
+        let (claim, _) = claim_ix(&v, &f, booking.pubkey(), true, bucket.pubkey(), rd64(&v.data(booking.pubkey()), 152));
+        execute(&mut v, &f.offers[0].provider, &[claim], &[], false);
+        assert_eq!(v.data(booking.pubkey())[148], 0);
     }
 
     #[test]
@@ -794,8 +894,8 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
         .svm
         .add_program(
             baseline.program,
-            &std::fs::read(root.join("target/receipt-bench/baseline/inference_router_program.so"))
-                .unwrap(),
+            &std::fs::read(baseline_path(root))
+                .expect("build baseline with cargo build-sbf --no-default-features --sbf-out-dir target/receipt-bench/baseline -- --locked, or set FOSSA_RECEIPT_BASELINE"),
         )
         .unwrap();
     let f = setup(&mut baseline, count, 7);
@@ -885,7 +985,8 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
         assert_eq!(prototype.data(active.pubkey())[148], 5);
     }
     // baseline rent returns completely; only transaction fees remain spent.
-    clock(&mut baseline, timestamp + 3901);
+    let retention_seconds = rd64(&prototype.data(active.pubkey()), 140) - timestamp as u64;
+    clock(&mut baseline, timestamp + retention_seconds as i64 + 1);
     let mut old_cleanup = Vec::new();
     for chunk in old_accounts.chunks(8) {
         old_cleanup.push(cleanup(&mut baseline, &f, chunk));
@@ -1022,7 +1123,7 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
         execute(&mut prototype, &admin, &[resolve], &[], true);
     }
     checks.push("independently reconstructed proofs across MMR mountains accepted");
-    clock(&mut prototype, timestamp + 3901);
+    clock(&mut prototype, timestamp + retention_seconds as i64 + 1);
     let expire_cu = execute(&mut prototype, &f.owner, &[expire.clone()], &[], true);
     execute(&mut prototype, &f.owner, &[expire], &[], false);
     let capacity = prototype.data(f.capacity);
@@ -1116,7 +1217,8 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
             w(active.pubkey()),
         ],
     );
-    clock(&mut prototype, timestamp + 4202);
+    let claim_end = rd64(&prototype.data(active.pubkey()), 132) as i64;
+    clock(&mut prototype, claim_end + 1);
     execute(&mut prototype, &f.owner, &[expiry.clone()], &[], false);
     expiry.data[1..9].copy_from_slice(&rd64(&prototype.data(active.pubkey()), 152).to_le_bytes());
     execute(&mut prototype, &f.owner, &[expiry], &[], true);
@@ -1153,6 +1255,8 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
             .lamports,
         before_close + locked - closed.fee
     );
+    let extra = Keypair::new();
+    init_bucket(&mut prototype, &f, &extra, count - 1, duration, true);
     book_one(&mut prototype, &f, &active, true, true);
     let (stale, slot) = claim_ix(
         &prototype,
@@ -1183,7 +1287,8 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
         extra.pubkey(),
         rd64(&prototype.data(active.pubkey()), 152),
     );
-    clock(&mut prototype, timestamp + 4500);
+    let epoch_end = rd64(&prototype.data(extra.pubkey()), 184) as i64;
+    clock(&mut prototype, epoch_end);
     execute(
         &mut prototype,
         &f.offers[slot].provider,
@@ -1233,32 +1338,24 @@ fn profile(root: &Path, legacy: bool, count: usize, samples: usize, duration: u3
     execute(&mut prototype,&f.owner,&[allocation,initialize],&[&future],true);
     assert_eq!(rd64(&prototype.data(future.pubkey()),176),target as u64);
     checks.push("next epoch history is funded before rollover");
-    json!({"token_program":if legacy{"legacy-spl-3.5"}else{"p-token"},"provider_count":count,"samples":samples,
+    json!({"token_program":if legacy{"legacy-spl-3.5"}else{"p-token"},"provider_count":count,"samples":samples,"retention_seconds":retention_seconds,
         "baseline":{"book_with_account_creation":stats(&old_book),"claim":stats(&old_claim),"finalize_close_batch8":stats(&old_cleanup)},
         "prototype":{"book_reused":stats(&new_book),"claim_with_receipt_hashing_and_log":stats(&new_claim),"cold_book":cold_book.unwrap().json(),"cold_bucket":init.json(),"expire_bucket":expire_cu.json(),"reuse_bucket":recycle_cu.json(),"open_dispute":dispute_cu.json(),"resolve_dispute":resolve_cu.json()},"checks":checks})
 }
 
 pub fn run() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = std::env::var("FOSSA_CONFIG").expect("set FOSSA_CONFIG for receipt benchmark");
-    let raw = std::fs::read_to_string(path).expect("benchmark config unavailable");
-    let config: toml::Table =
-        toml::from_str(&raw).unwrap_or_else(|_| panic!("invalid root config"));
-    let bench = config
-        .get("receipt_benchmark")
-        .expect("receipt_benchmark config missing");
-    let duration = bench["epoch_seconds"].as_integer().unwrap() as u32;
-    let counts: Vec<_> = bench["offer_counts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_integer().unwrap() as usize)
-        .collect();
-    let samples = bench["samples"].as_integer().unwrap() as usize;
-    let scale_samples = bench["scale_samples"].as_integer().unwrap() as usize;
+    let raw = std::env::var_os("FOSSA_BENCH_CONFIG")
+        .map(|path| std::fs::read_to_string(path).expect("benchmark config unavailable"))
+        .unwrap_or_else(|| include_str!("../config.example.toml").to_owned());
+    let bench = settings(&raw).expect("invalid receipt benchmark settings");
+    let duration = bench.epoch_seconds;
+    let counts = &bench.offer_counts;
+    let samples = bench.samples;
+    let scale_samples = bench.scale_samples;
     let mut profiles = Vec::new();
     for legacy in [false, true] {
-        for &count in &counts {
+        for &count in counts {
             eprintln!(
                 "receipt benchmark: token={} offers={count}",
                 if legacy { "legacy" } else { "p-token" }
@@ -1272,14 +1369,12 @@ pub fn run() {
             ));
         }
     }
-    let rents: Value = serde_json::from_slice(
-        &std::fs::read(root.join("target/receipt-bench/rent-quote.json")).unwrap(),
-    )
-    .unwrap();
-    let booking_rent = rents["lamports"]["368"].as_u64().unwrap();
-    let bucket_rent = rents["lamports"]["736"].as_u64().unwrap();
-    let requests = bench["requests_per_day"].as_integer().unwrap() as u64;
-    let sol_usd = bench["illustrative_sol_usd"].as_float().unwrap();
+    let svm = LiteSVM::new();
+    let booking_rent = svm.minimum_balance_for_rent_exemption(368);
+    let bucket_rent = svm.minimum_balance_for_rent_exemption(736);
+    let rents = json!({"source":"local LiteSVM rent sysvar; no live network quote","lamports":{"368":booking_rent,"736":bucket_rent}});
+    let requests = bench.requests_per_day;
+    let sol_usd = bench.illustrative_sol_usd;
     let mut economics = Vec::new();
     for profile in &profiles {
         let old = &profile["baseline"];
@@ -1315,30 +1410,27 @@ pub fn run() {
                 * (new["expire_bucket"]["cu"].as_u64().unwrap()
                     + new["reuse_bucket"]["cu"].as_u64().unwrap()) as f64
                 / requests as f64;
-        economics.push(json!({"token_program":profile["token_program"],"provider_count":profile["provider_count"],"scope":"10,000 requests uniformly over 24 hours; one selected provider; owner fee payer; baseline cleanup batched 8; prototype maintenance unbatched; cold setup and disputes excluded",
+        economics.push(json!({"token_program":profile["token_program"],"provider_count":profile["provider_count"],"scope":format!("{requests} requests uniformly over 24 hours; one selected provider; owner fee payer; baseline cleanup batched 8; prototype maintenance unbatched; cold setup and disputes excluded"),
             "baseline_fee_sol_per_day":old_fees as f64/1e9,"prototype_fee_sol_per_day":new_fees as f64/1e9,"fee_reduction_percent":100.0*(1.0-new_fees as f64/old_fees as f64),
             "baseline_cu_per_request_including_maintenance":old_cu,"prototype_cu_per_request_including_maintenance":new_cu,"cu_change_percent":100.0*(new_cu/old_cu-1.0)}));
     }
     let mut scenarios = Vec::new();
+    let retention_seconds = profiles.iter().map(|profile| profile["retention_seconds"].as_u64().unwrap()).max().unwrap();
     for hours in [24u64, 1] {
         let rate = requests as f64 / (hours * 3600) as f64;
-        for delay in bench["settlement_seconds"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_integer().unwrap() as u64)
-        {
-            let old_records = ((rate * 3900.0).ceil() as u64).min(requests);
+        for &delay in &bench.settlement_seconds {
+            let old_records = ((rate * retention_seconds as f64).ceil() as u64).min(requests);
             let active_records = ((rate * delay as f64).ceil().max(1.0) as u64).min(requests);
-            let buckets = 3900u64.div_ceil(u64::from(duration)) + 1;
+            let buckets = retention_seconds.div_ceil(u64::from(duration)) + 1;
             let old = old_records * booking_rent;
             let new = active_records * booking_rent + buckets * bucket_rent;
             scenarios.push(json!({"requests":requests,"arrival_hours":hours,"settlement_seconds":delay,"baseline_outstanding_records":old_records,"prototype_active_records":active_records,"history_buckets_one_provider":buckets,"baseline_locked_sol":old as f64/1e9,"prototype_locked_sol":new as f64/1e9,"locked_sol_reduction_percent":100.0*(1.0-new as f64/old as f64),"baseline_locked_usd_at_example_price":old as f64/1e9*sol_usd,"prototype_locked_usd_at_example_price":new as f64/1e9*sol_usd}));
         }
     }
-    let output = json!({"scope":"local LiteSVM real SBF execution; no mainnet transactions or TPS measurement","program_hashes":{"baseline":format!("{:x}",Sha256::digest(std::fs::read(root.join("target/receipt-bench/baseline/inference_router_program.so")).unwrap())),"prototype":format!("{:x}",Sha256::digest(std::fs::read(prototype_path(&root)).unwrap()))},"rent_quote":rents,"rent_is_spent":false,"storage":{"active_record_bytes":368,"history_bucket_bytes":BUCKET_LEN,"receipt_bytes_published":RECEIPT_LEN,"max_receipts_per_bucket":65535,"bucket_seconds":duration},"illustrative_sol_usd":sol_usd,"profiles":profiles,"scenarios":scenarios,"economics":economics,"limitations":["matching and balance write locks unchanged; not a network-scale throughput implementation","history buckets are per provider/model; multiple providers increase storage","active records need funding and can grow; benchmark excludes backend sponsor allocation","independent receipt reconstruction tested from runtime logs; this benchmark does not exercise backend archival","scenarios assume uniform arrivals, successful settlement, prompt cleanup and no persistent disputes; setup balances shared by both designs excluded","no priority fee configured; full transaction base fees measured separately from refundable rent","MMR proofs may need refreshing while a bucket is appending; epochs close before the receipt dispute deadline"]});
+    let output = json!({"scope":"local LiteSVM real SBF execution; no mainnet transactions or TPS measurement","program_hashes":{"baseline":format!("{:x}",Sha256::digest(std::fs::read(baseline_path(&root)).unwrap())),"prototype":format!("{:x}",Sha256::digest(std::fs::read(prototype_path(&root)).unwrap()))},"rent_quote":rents,"rent_is_spent":false,"storage":{"active_record_bytes":368,"history_bucket_bytes":BUCKET_LEN,"receipt_bytes_published":RECEIPT_LEN,"max_receipts_per_bucket":65535,"bucket_seconds":duration},"illustrative_sol_usd":sol_usd,"profiles":profiles,"scenarios":scenarios,"economics":economics,"limitations":["matching and balance write locks unchanged; not a network-scale throughput implementation","history buckets are per provider/model; multiple providers increase storage","active records need funding and can grow; benchmark excludes backend sponsor allocation","independent receipt reconstruction tested from runtime logs; this benchmark does not exercise backend archival","scenarios assume uniform arrivals, successful settlement, prompt cleanup and no persistent disputes; setup balances shared by both designs excluded","no priority fee configured; full transaction base fees measured separately from refundable rent","MMR proofs may need refreshing while a bucket is appending; epochs close before the receipt dispute deadline"]});
     let dest = std::env::var_os("FOSSA_RECEIPT_OUTPUT").map(PathBuf::from)
         .unwrap_or_else(|| root.join("target/receipt-bench/results.json"));
+    if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent).unwrap(); }
     std::fs::write(&dest, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }

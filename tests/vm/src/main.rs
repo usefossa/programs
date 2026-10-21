@@ -12,6 +12,8 @@ use solana_transaction::Transaction;
 #[path = "../../../src/abi.rs"]
 mod abi;
 use abi::*;
+#[path = "../../support/mod.rs"]
+mod support;
 const TOKEN: Address = address!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const SYSTEM: Address = address!("11111111111111111111111111111111");
 fn key() -> Address {
@@ -55,21 +57,9 @@ struct Vm {
 }
 impl Vm {
     fn new() -> Self {
-        let mut svm = LiteSVM::new();
+        let mut svm = support::svm(std::env::var_os("FOSSA_LEGACY_TOKEN").is_some());
         let program = key();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/deploy/inference_router_program.so");
-        let path = std::env::var("FOSSA_SBF")
-            .map(std::path::PathBuf::from)
-            .unwrap_or(path);
-        if std::env::var("FOSSA_LEGACY_TOKEN").is_ok() {
-            let path = std::env::var("LEGACY_TOKEN_SBF")
-                .expect("set LEGACY_TOKEN_SBF to a legacy spl-token SBF artifact");
-            svm.add_program(TOKEN, &std::fs::read(path).unwrap())
-                .unwrap();
-        }
-        svm.add_program(program, &std::fs::read(path).unwrap())
-            .unwrap();
+        support::load_program(&mut svm, program);
         let payer = Keypair::new();
         svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
         Self {
