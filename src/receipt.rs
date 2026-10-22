@@ -1,4 +1,18 @@
-use super::*;
+use crate::{
+    abi::{BOOKING_LEN, BOOK_MAGIC},
+    helpers::{add, err, rd32, rd64, require, ri64, sub, wi64, wr32, wr64},
+    state::{
+        all_zero, book, fresh, initialize_pda, market, model, slot_offset, state, user, writable,
+    },
+    DISPUTE_SECONDS,
+};
+use pinocchio::{
+    cpi::Signer,
+    error::ProgramError,
+    instruction::seeds,
+    sysvars::{clock::Clock, Sysvar},
+    AccountView, Address, ProgramResult,
+};
 
 pub const AVAILABLE: u8 = 5;
 pub const CASE: u8 = 0xa5;
@@ -23,10 +37,12 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
 }
 
 #[cfg(not(target_os = "solana"))]
-fn hash(parts: &[&[u8]]) -> [u8;32] {
-    use sha2::{Digest,Sha256};
-    let mut hash=Sha256::new();
-    for part in parts { hash.update(part); }
+fn hash(parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update(part);
+    }
     hash.finalize().into()
 }
 
@@ -94,7 +110,10 @@ pub fn settled(
 ) -> ProgramResult {
     // top-level instruction bytes remain available independently of optional cpi traces.
     #[cfg(target_os = "solana")]
-    require(unsafe { pinocchio::syscalls::sol_get_stack_height() } == 1, 4)?;
+    require(
+        unsafe { pinocchio::syscalls::sol_get_stack_height() } == 1,
+        4,
+    )?;
     require(published.len() == 16 + RECEIPT_LEN, 3)?;
     let bd = booking.try_borrow()?;
     let mut receipt = [0; RECEIPT_LEN];
@@ -126,7 +145,10 @@ pub fn settled(
     require(now >= ri64(&hd, 176) && now < ri64(&hd, 184), 7)?;
     let count = rd64(&hd, 200);
     require(count < (1u64 << DEPTH) - 1, 6)?;
-    require(published[..8] == hd[176..184] && rd64(published, 8) == count, 7)?;
+    require(
+        published[..8] == hd[176..184] && rd64(published, 8) == count,
+        7,
+    )?;
     let total = add(rd64(&hd, 208), charge)?;
     let outstanding = add(rd64(&hd, 216), 1)?;
     let deadline = ri64(&hd, 192).max(ri64(&bd, 140));
@@ -188,7 +210,10 @@ pub fn process(program: &Address, accounts: &mut [AccountView], op: u8, p: &[u8]
             let now = Clock::get()?.unix_timestamp;
             let current = now.div_euclid(duration) * duration;
             let epoch = if p.len() == 16 { ri64(p, 8) } else { current };
-            require(epoch == current || epoch == current.checked_add(duration).ok_or(err(1))?, 3)?;
+            require(
+                epoch == current || epoch == current.checked_add(duration).ok_or(err(1))?,
+                3,
+            )?;
             require(
                 bucket.owner() == program && bucket.data_len() == BUCKET_LEN,
                 2,
@@ -364,7 +389,9 @@ pub fn process(program: &Address, accounts: &mut [AccountView], op: u8, p: &[u8]
             Ok(())
         }
         26 => {
-            let [m, u, owner, b, payer] = accounts else { return Err(err(3)); };
+            let [m, u, owner, b, payer] = accounts else {
+                return Err(err(3));
+            };
             require(p.is_empty() && owner.is_signer() && payer.is_signer(), 4)?;
             market(m, program)?;
             user(u, program, owner.address(), m.address())?;
@@ -379,7 +406,9 @@ pub fn process(program: &Address, accounts: &mut [AccountView], op: u8, p: &[u8]
             Ok(())
         }
         27 => {
-            let [bucket, recipient, authority] = accounts else { return Err(err(3)); };
+            let [bucket, recipient, authority] = accounts else {
+                return Err(err(3));
+            };
             require(p.is_empty() && bucket.address() != recipient.address(), 3)?;
             writable(&[bucket, recipient])?;
             let d = state(bucket, program, BUCKET_LEN, MAGIC)?;
@@ -392,8 +421,11 @@ pub fn process(program: &Address, accounts: &mut [AccountView], op: u8, p: &[u8]
             )?;
             let now = Clock::get()?.unix_timestamp;
             require(
-                d[173] == 1 && rd64(&d, 208) == 0 && rd64(&d, 216) == 0
-                    && now >= ri64(&d, 184) && now > ri64(&d, 192),
+                d[173] == 1
+                    && rd64(&d, 208) == 0
+                    && rd64(&d, 216) == 0
+                    && now >= ri64(&d, 184)
+                    && now > ri64(&d, 192),
                 7,
             )?;
             drop(d);

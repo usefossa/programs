@@ -1,6 +1,6 @@
 # programs
 
-standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt_prototype.rs`. provider onboarding tools and metadata schemas belong in sibling `providers/`; `ops/` here contains only program upgrade tooling.
+standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt.rs`. provider onboarding tools and metadata schemas belong in sibling `providers/`; `ops/` here contains only program upgrade tooling.
 
 ## workflow
 

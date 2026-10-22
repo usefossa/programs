@@ -1,4 +1,10 @@
-use super::*;
+use crate::{
+    abi::*,
+    helpers::{fee, wr32, wr64},
+    matching::{select, Match, Request},
+    state::all_zero,
+    CLAIM_SECONDS,
+};
 use std::vec::Vec;
 
 #[test]
@@ -303,7 +309,10 @@ fn maximum_book_scan_ignores_unregistered_tail_and_rejects_oversized_count() {
     for slot in 0..MAX_ENTRIES - 1 {
         terms[HEADER_LEN + slot * TERMS_LEN + 111] = 0;
     }
-    assert_eq!(select(&terms, &capacity, &request).unwrap().slot, MAX_ENTRIES as u32 - 1);
+    assert_eq!(
+        select(&terms, &capacity, &request).unwrap().slot,
+        MAX_ENTRIES as u32 - 1
+    );
     terms[HEADER_LEN + (MAX_ENTRIES - 1) * TERMS_LEN + 111] = 0;
     assert!(select(&terms, &capacity, &request).is_err());
     wr32(&mut terms, 44, MAX_ENTRIES as u32 + 1);
