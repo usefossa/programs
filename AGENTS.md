@@ -1,12 +1,12 @@
 # programs
 
-standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt.rs`. provider onboarding tools and metadata schemas belong in sibling `providers/`; `ops/` here contains only program upgrade tooling.
+on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt.rs`. `ops/` contains program upgrade tooling.
 
 ## workflow
 
 - read relevant implementation before editing. ask when unsure; keep changes concise and latency first.
 - no commits, pushes, documentation files, programs, or subagents unless requested. quick edits end without automatic checks.
-- keep this repository private unless explicitly asked to change visibility. never publish packages without an explicit request.
+- never publish packages without an explicit request.
 - no browser screenshots. prose and comments lowercase; preserve normal casing in identifiers, commands, urls, and user-facing text.
 - deployment, upgrades, onboarding, signing, and fund movement require explicit authorization. repository maintenance does not authorize on-chain operations.
 - preserve local configuration, encrypted signer records, keys, build artifacts, and test ledgers. never commit credentials, private state, or generated artifacts.
@@ -22,8 +22,8 @@ standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.
 
 ## configuration
 
-- on-chain code reads accounts and instruction data, never toml or backend configuration.
-- upgrade operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; paths inside config resolve relative to that file. use standard solana json keypairs. commands plan/inspect by default; `--execute` enables writes. provider onboarding and metadata validation use sibling `providers/cli/`.
+- on-chain code reads accounts and instruction data, never off-chain configuration.
+- upgrade operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; paths inside config resolve relative to that file. use standard solana json keypairs. commands plan/inspect by default; `--execute` enables writes.
 - examples contain placeholders only; do not point verification at live operator credentials. keep signer files outside git; preserve upgrade buffer keypairs for recovery.
 - `FOSSA_SBF` optionally overrides the built program artifact. litesvm bundles both token implementations; `LEGACY_TOKEN_SBF` optionally overrides legacy token code, and `FOSSA_LEGACY_TOKEN` enables the legacy vm smoke scenario.
 - receipt benchmarks use built-in `tests/stress/config.example.toml` defaults and local vm rent. `FOSSA_BENCH_CONFIG`, `FOSSA_RECEIPT_BASELINE`, `FOSSA_RECEIPT_PROTOTYPE` and `FOSSA_RECEIPT_OUTPUT` optionally override benchmark inputs/output.
