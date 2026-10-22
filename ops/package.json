@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "onboard": "bun onboard.ts",
     "upgrade": "bun upgrade.ts",
     "test": "bun test",
     "check": "tsc --noEmit"
@@ -16,7 +15,7 @@
     "@types/node": "^24",
     "typescript": "^5"
   },
-  "version": "0.8.0",
+  "version": "0.9.0",
   "overrides": {
     "uuid": "11.1.1",
     "jayson": "5.0.0"

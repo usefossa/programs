@@ -1,6 +1,6 @@
 # programs
 
-standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt_prototype.rs`.
+standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt_prototype.rs`. provider onboarding tools and metadata schemas belong in sibling `providers/`; `ops/` here contains only program upgrade tooling.
 
 ## workflow
 
@@ -23,7 +23,7 @@ standalone `usefossa/programs` repository. on-chain pinocchio program: `src/lib.
 ## configuration
 
 - on-chain code reads accounts and instruction data, never toml or backend configuration.
-- operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; paths inside config resolve relative to that file. standard solana json keypairs and caller-hosted metadata replace application storage dependencies. commands plan/inspect by default; `--execute` enables writes.
+- upgrade operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; paths inside config resolve relative to that file. use standard solana json keypairs. commands plan/inspect by default; `--execute` enables writes. provider onboarding and metadata validation use sibling `providers/cli/`.
 - examples contain placeholders only; do not point verification at live operator credentials. keep signer files outside git; preserve upgrade buffer keypairs for recovery.
 - `FOSSA_SBF` optionally overrides the built program artifact. litesvm bundles both token implementations; `LEGACY_TOKEN_SBF` optionally overrides legacy token code, and `FOSSA_LEGACY_TOKEN` enables the legacy vm smoke scenario.
 - receipt benchmarks use built-in `tests/stress/config.example.toml` defaults and local vm rent. `FOSSA_BENCH_CONFIG`, `FOSSA_RECEIPT_BASELINE`, `FOSSA_RECEIPT_PROTOTYPE` and `FOSSA_RECEIPT_OUTPUT` optionally override benchmark inputs/output.

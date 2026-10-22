@@ -1,38 +1,10 @@
-# pass --config <path> or set FOSSA_CONFIG; paths below are relative to this file.
-# commands only inspect/plan unless --execute is supplied.
-# publish metadata files unchanged at their configured urls before execution.
-
+# pass --config <path> or set FOSSA_CONFIG; paths resolve relative to this file.
+# upgrade only inspects/plans unless --execute is supplied.
 [solana]
 rpc_url = "https://rpc.example.com"
-usdc_mint = "REPLACE_WITH_PAYMENT_MINT"
-
 [marketplace]
 program_id = "REPLACE_WITH_PROGRAM_PUBLIC_KEY"
-market = "REPLACE_WITH_MARKET_PUBLIC_KEY"
-
 [operator]
-# standard solana-keygen json files; keep outside git.
-# provider signer for onboarding, upgrade authority for upgrades.
-keypair = "../.local/provider-keypair.json"
-# optional separate fee payer and market admin for onboarding.
+keypair = "../.local/upgrade-authority.json"
+buffer = "../.local/upgrade-buffer.json"
 # payer = "../.local/payer-keypair.json"
-# admin = "../.local/admin-keypair.json"
-# required for upgrades; create once with solana-keygen, retain for interrupted uploads.
-# buffer = "../.local/upgrade-buffer.json"
-
-[provider]
-wallet = "REPLACE_WITH_PROVIDER_PUBLIC_KEY"
-metadata_file = "../.local/provider.json"
-metadata_uri = "https://provider.example.com/provider.json"
-speed_tps = 100
-capacity = 4
-model_book_limit = 16
-bond_target_atomic = "1000000"
-
-[[provider.models]]
-id = "example/model"
-metadata_file = "../.local/model.json"
-metadata_uri = "https://provider.example.com/model.json"
-input_rate = 1000000
-cached_rate = 500000
-output_rate = 2000000

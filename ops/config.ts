@@ -1,20 +1,12 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Keypair, PublicKey, type Signer } from "@solana/web3.js";
 
-export type Document = { metadata_file: string; metadata_uri: string };
-export type Offer = {
-  input_rate: number; cached_rate: number; output_rate: number; speed_tps: number; capacity: number;
-  private?: boolean; active?: boolean; bond_target_atomic: number | string;
-};
-export type Model = Document & Partial<Offer> & { id: string };
 export type Config = {
   base: string;
-  solana: { rpc_url: string; usdc_mint: string };
-  marketplace: { program_id: string; market: string };
-  operator?: { keypair?: string; payer?: string; admin?: string; buffer?: string };
-  provider: Document & Offer & { wallet: string; model_book_limit: number; models: Model[] };
+  solana: { rpc_url: string };
+  marketplace: { program_id: string };
+  operator?: { keypair?: string; payer?: string; buffer?: string };
 };
 
 export function loadConfig(path = process.env.FOSSA_CONFIG): Config {
@@ -56,40 +48,4 @@ export function loadKeypair(base: string, path?: string, expected?: PublicKey): 
     raw.fill(0);
     if (Array.isArray(values)) values.fill(0);
   }
-}
-
-export function metadata(base: string, document: Document): Buffer {
-  if (typeof document.metadata_uri !== "string" || typeof document.metadata_file !== "string") throw Error("Configure metadata_file and metadata_uri.");
-  const uri = Buffer.from(document.metadata_uri ?? "");
-  if (!uri.length || uri.length > 256 || uri.some(byte => byte <= 32 || byte === 127)) throw Error("Metadata URI must be 1–256 UTF-8 bytes without ASCII whitespace or controls.");
-  const body = readFileSync(resolve(base, document.metadata_file));
-  const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Metadata file must contain a JSON object.");
-  return Buffer.concat([createHash("sha256").update(body).digest(), uri]);
-}
-
-export function integer(value: number, max = 0xffff_ffff, min = 0): number {
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw Error(`Expected integer between ${min} and ${max}.`);
-  return value;
-}
-
-export function atomic(value: number | string): bigint {
-  if (typeof value === "number" && !Number.isSafeInteger(value)) throw Error("Unsafe token amount; use a decimal string.");
-  if (!/^\d+$/.test(String(value))) throw Error("Expected an unsigned token amount.");
-  const amount = BigInt(value);
-  if (amount > 0xffff_ffff_ffff_ffffn) throw Error("Token amount exceeds u64.");
-  return amount;
-}
-
-export function terms(offer: Offer): Buffer {
-  const data = Buffer.alloc(20);
-  for (const [index, value] of [offer.input_rate, offer.cached_rate, offer.output_rate].entries()) data.writeUInt32LE(integer(value), index * 4);
-  if (!offer.input_rate || !offer.output_rate || offer.cached_rate > offer.input_rate) throw Error("Invalid offer rates.");
-  data.writeUInt16LE(integer(offer.speed_tps, 0xffff, 1), 12);
-  for (const flag of [offer.private, offer.active]) if (flag !== undefined && typeof flag !== "boolean") throw Error("Offer flags must be boolean.");
-  data[14] = Number(offer.private ?? false);
-  data[15] = Number(offer.active ?? true);
-  data.writeUInt32LE(integer(offer.capacity, 0xffff_ffff, 1), 16);
-  atomic(offer.bond_target_atomic);
-  return data;
 }
