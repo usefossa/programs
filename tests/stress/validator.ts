@@ -126,15 +126,19 @@ async function metadataChecks() {
     ix(18, Buffer.concat([id, limit, metadataPayload(maximumUri, 41)]), [meta(m.market), meta(model, true), meta(terms.publicKey, true, true), meta(capacity.publicKey, true, true), meta(newcomer.publicKey, false, true), meta(payer.publicKey, true, true), meta(SystemProgram.programId), meta(profile), meta(modelMetadataKey, true)]),
   ]
   const feePayer = key(metadata.payers[64]!.key), signers = [payer, newcomer, terms, capacity]
-  await rejected(await tx(init, feePayer, signers, 50_000, 300_000), 4, [model, modelMetadataKey, terms.publicKey, capacity.publicKey])
+  const authorized = [...init.slice(0, 2), ix(18, init[2]!.data.subarray(1), [...init[2]!.keys, meta(admin.publicKey, false, true)])]
+  const watched = [model, modelMetadataKey, terms.publicKey, capacity.publicKey]
+  await rejected(await tx(authorized, payer, [...signers, admin], 50_000, 300_000), 4, watched)
   await send(await tx([ix(20, Buffer.from([1]), [meta(m.market), meta(profile, true), meta(admin.publicKey, false, true)])], payer, [admin], 8_000, 300_000))
-  const value = await tx(init, feePayer, signers, 50_000, 300_000), signature = await send(value)
+  await rejected(await tx(init, feePayer, signers, 50_000, 300_000), 4, watched)
+  // admin also pays the fee, keeping maximum-uri creation within the packet limit.
+  const value = await tx(authorized, admin, signers, 50_000, 300_000), signature = await send(value)
   const created = await accounts([model, modelMetadataKey])
   assert.equal(created[0]!.data.length, 144); assert.equal(created[1]!.data.length, 396)
   assert(created[1]!.data.subarray(72, 104).equals(newcomer.publicKey.toBuffer()))
   assert.equal(created[1]!.data.readUInt16LE(136), 256)
   const result = await rpc.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 })
-  metadataCases.push({ maxUri: 256, modelCreationBytes: value.serialize().length, signers: value.signatures.length, modelCreationCu: result!.meta!.computeUnitsConsumed, unapprovedCreationRollback: true })
+  metadataCases.push({ maxUri: 256, modelCreationBytes: value.serialize().length, signers: value.signatures.length, modelCreationCu: result!.meta!.computeUnitsConsumed, unapprovedCreationRollback: true, approvedWithoutAdminRollback: true, adminAuthorizedCreation: true })
 }
 async function concurrentMetadata(m: Model, firstBook: Prepared) {
   const offer = m.offers.at(-1)!, provider = key(offer.providerKey), creator = key(m.creatorKey), payer = key(metadata.payers[65]!.key), prepared: Prepared[] = []

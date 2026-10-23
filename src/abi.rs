@@ -27,7 +27,8 @@ pub const UNBOND_MAGIC: &[u8; 8] = b"UNBNDV20";
 // market: magic0, admin8[32], mint40[32]. immutable after initialization.
 // model: magic0, market8[32], model_id40[32], terms72[32], capacity104[32], limit136:u32, bump140:u8.
 // model pda: [b"model", market, model_id]. model_id is an opaque model/version identifier.
-// approved providers initialize models; canonical ids and book bindings remain immutable.
+// approved providers initialize models with market admin authorization.
+// canonical ids and book bindings remain immutable.
 // provider pda: [b"provider", market, provider]. magic0, market8[32], authority40[32],
 // document_sha25672[32], uri_len104:u16, approved106:u8, bump107:u8, uri108[256].
 // model metadata pda: [b"model_metadata", model]. magic0, market8[32], model40[32],
