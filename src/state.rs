@@ -79,7 +79,7 @@ pub(crate) fn profile<'a>(
     )?;
     Ok(d)
 }
-pub(crate) fn approved_provider(
+pub(crate) fn registered_provider(
     a: &AccountView,
     provider: &AccountView,
     m: &Address,
@@ -87,7 +87,7 @@ pub(crate) fn approved_provider(
 ) -> ProgramResult {
     let d = profile(a, program, m)?;
     require(
-        provider.is_signer() && &d[40..72] == provider.address().as_ref() && d[106] == 1,
+        provider.is_signer() && &d[40..72] == provider.address().as_ref(),
         4,
     )
 }

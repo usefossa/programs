@@ -5,7 +5,8 @@ pub mod abi;
 mod helpers;
 mod instructions;
 mod matching;
-#[cfg(feature = "receipt-prototype")]
+#[cfg(feature = "legacy-migration")]
+mod migration;
 mod receipt;
 mod state;
 mod token;
@@ -24,14 +25,6 @@ pinocchio::nostd_panic_handler!();
 pub const CLAIM_SECONDS: i64 = 30;
 #[cfg(not(feature = "local-test"))]
 pub const CLAIM_SECONDS: i64 = 300;
-#[cfg(feature = "local-test")]
-pub const DISPUTE_SECONDS: i64 = 8;
-#[cfg(not(feature = "local-test"))]
-pub const DISPUTE_SECONDS: i64 = 3_600;
-#[cfg(feature = "local-test")]
-pub const UNBOND_SECONDS: i64 = 5;
-#[cfg(not(feature = "local-test"))]
-pub const UNBOND_SECONDS: i64 = 3_600;
 
 pub fn process_instruction(
     program: &Address,
@@ -39,31 +32,28 @@ pub fn process_instruction(
     data: &[u8],
 ) -> ProgramResult {
     let (&op, p) = data.split_first().ok_or(err(3))?;
-    #[cfg(feature = "receipt-prototype")]
-    if op >= 23 {
-        return receipt::process(program, accounts, op, p);
-    }
     match op {
         0 => instructions::market::initialize(program, accounts, p),
         1 => instructions::user::initialize(program, accounts, p),
         2 => instructions::provider::register_offer(program, accounts, p),
         3 => instructions::user::deposit(program, accounts, p),
-        4 => instructions::bond::fund(program, accounts, p),
-        5 | 16 => instructions::provider::update_offer(program, accounts, op, p),
+        5 => instructions::provider::update_offer(program, accounts, p),
         6 => instructions::booking::reserve(program, accounts, p),
         7 => instructions::booking::claim(program, accounts, p),
         8 | 15 => instructions::booking::release(program, accounts, op, p),
-        9 => instructions::booking::finalize(program, accounts, p),
         10 => instructions::user::withdraw(program, accounts, p),
-        11 => instructions::dispute::open(program, accounts, p),
-        12 => instructions::dispute::resolve(program, accounts, p),
-        13 => instructions::bond::request_unbond(program, accounts, p),
-        14 => instructions::bond::execute_unbond(program, accounts, p),
         17 => instructions::booking::close(program, accounts, p),
         18 => instructions::market::initialize_model(program, accounts, p),
         19 => instructions::provider::initialize(program, accounts, p),
-        20 | 21 => instructions::provider::update_profile(program, accounts, op, p),
+        21 => instructions::provider::update_profile(program, accounts, p),
         22 => instructions::market::update_metadata(program, accounts, p),
+        26 => receipt::initialize(program, accounts, p),
+        28 => instructions::list::initialize(program, accounts, p),
+        29 => instructions::list::update(program, accounts, p),
+        30 => instructions::list::close(program, accounts, p),
+        32 => instructions::market::grow(program, accounts, p),
+        #[cfg(feature = "legacy-migration")]
+        31 => migration::sweep(program, accounts, p),
         _ => Err(err(3)),
     }
 }

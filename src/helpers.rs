@@ -55,6 +55,3 @@ pub(crate) fn fee(tokens: u32, rate: u32) -> u64 {
     // maximum u32 product plus 999_999 fits u64; all caller operands have those bounds.
     (u64::from(tokens) * u64::from(rate) + UNIT - 1) / UNIT
 }
-pub(crate) fn collateral(exposure: u64) -> Result<u64, ProgramError> {
-    add(exposure, exposure.div_ceil(100))
-}

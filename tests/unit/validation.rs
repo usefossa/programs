@@ -1,7 +1,7 @@
 use crate::{
     abi::*,
-    helpers::{add, collateral, rd16, sub, wr32, wr64},
-    matching::{select, Request},
+    helpers::{add, rd16, sub, wr32, wr64},
+    matching::{Match, Request},
     state::{metadata_payload, rates, write_metadata},
 };
 use std::vec;
@@ -145,8 +145,6 @@ fn matching_rejects_truncated_books_and_inconsistent_registered_counts() {
 fn checked_accounting_matches_u128_at_overflow_boundaries() {
     let values = [0, 1, 99, 100, 101, u64::MAX / 2, u64::MAX - 1, u64::MAX];
     for a in values {
-        let wide = u128::from(a) + u128::from(a).div_ceil(100);
-        assert_eq!(collateral(a).ok(), u64::try_from(wide).ok());
         for b in values {
             assert_eq!(
                 add(a, b).ok(),
@@ -155,4 +153,26 @@ fn checked_accounting_matches_u128_at_overflow_boundaries() {
             assert_eq!(sub(a, b).ok(), a.checked_sub(b));
         }
     }
+}
+
+fn all_providers() -> std::vec::Vec<u8> {
+    (1..=255u8).flat_map(|key| [key; 32]).collect()
+}
+fn select(t: &[u8], c: &[u8], r: &Request) -> Result<Match, pinocchio::error::ProgramError> {
+    select_on_list(t, c, &all_providers(), r)
+}
+
+fn select_on_list(
+    t: &[u8],
+    c: &[u8],
+    keys: &[u8],
+    r: &Request,
+) -> Result<Match, pinocchio::error::ProgramError> {
+    let count = keys.len() / 32;
+    let mut list = std::vec![0;provider_list_len(count.max(1))];
+    wr32(&mut list, 72, count.max(1) as u32);
+    wr32(&mut list, 76, count as u32);
+    list[80..80 + keys.len()].copy_from_slice(keys);
+    crate::instructions::list::rebuild(&mut list);
+    crate::matching::select(t, c, &list, r)
 }

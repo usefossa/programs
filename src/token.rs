@@ -43,6 +43,7 @@ pub(crate) fn user_vault(
         Address::derive_address(&[b"vault", u.address().as_ref()], Some(ud[112]), program);
     vault_owned_by(vault, mint.address(), &authority)
 }
+#[cfg(feature = "legacy-migration")]
 pub(crate) fn bond_vault(
     accounts: [&AccountView; 2],
     md: &[u8],
@@ -92,6 +93,7 @@ pub(crate) fn user_transfer(
     TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, authority, amount, 6)
         .invoke_signed(&[Signer::from(&signer_seeds)])
 }
+#[cfg(feature = "legacy-migration")]
 pub(crate) fn bond_transfer(
     accounts: [&AccountView; 4],
     model: &Address,

@@ -1,6 +1,6 @@
 use crate::{
     abi::{CAPACITY_LEN, HEADER_LEN, MAX_ENTRIES, TERMS_LEN},
-    helpers::{collateral, err, fee, rd16, rd32, rd64, require},
+    helpers::{err, fee, rd16, rd32, rd64, require},
     CLAIM_SECONDS,
 };
 use pinocchio::error::ProgramError;
@@ -49,10 +49,14 @@ pub(crate) struct Match {
     pub(crate) slot: u32,
     pub(crate) reserve: u64,
     pub(crate) score: u64,
-    pub(crate) exposure: u64,
     pub(crate) cache: bool,
 }
-pub(crate) fn select(terms: &[u8], capacity: &[u8], r: &Request) -> Result<Match, ProgramError> {
+pub(crate) fn select(
+    terms: &[u8],
+    capacity: &[u8],
+    providers: &[u8],
+    r: &Request,
+) -> Result<Match, ProgramError> {
     let count = rd32(terms, 44) as usize;
     require(
         count <= MAX_ENTRIES && count == rd32(capacity, 44) as usize,
@@ -64,14 +68,25 @@ pub(crate) fn select(terms: &[u8], capacity: &[u8], r: &Request) -> Result<Match
     let capacity = capacity
         .get(HEADER_LEN..HEADER_LEN + count * CAPACITY_LEN)
         .ok_or(err(2))?;
+    // runtime account data and fixed entries are eight-byte aligned; validate before word reads.
+    require(
+        (terms.as_ptr() as usize | capacity.as_ptr() as usize | providers.as_ptr() as usize) & 7
+            == 0,
+        2,
+    )?;
+    let members = crate::instructions::list::Members::new(providers);
     // ceil(output / speed) must fit the claim window; compute required speed once.
     let min_speed =
         u32::from(r.min_speed).max(r.max_output.div_ceil((86_400 - CLAIM_SECONDS) as u32));
+    let cache_words: [u64; 4] = core::array::from_fn(|i| rd64(&r.cache_provider, i * 8));
+    let cache_member = r.estimated_cached > 0
+        && members.contains(unsafe {
+            core::slice::from_raw_parts(cache_words.as_ptr().cast::<u8>(), 32)
+        });
     let mut best = Match {
         slot: 0,
         reserve: 0,
         score: u64::MAX,
-        exposure: 0,
         cache: false,
     };
     for (slot, (t, c)) in terms
@@ -79,48 +94,56 @@ pub(crate) fn select(terms: &[u8], capacity: &[u8], r: &Request) -> Result<Match
         .zip(capacity.chunks_exact(CAPACITY_LEN))
         .enumerate()
     {
-        if t[111] != 1
-            || t[112] != 1
-            || (r.private && t[110] != 1)
-            || u32::from(rd16(t, 108)) < min_speed
-            || rd32(c, 16) >= rd32(t, 116)
-            || rd32(c, 20) == u32::MAX
+        let provider = &t[..32];
+        // both complete entries contain integer bytes only; alignment and lengths were checked above.
+        let words = unsafe { &*t.as_ptr().cast::<[u64; 15]>() };
+        let state = unsafe { &*c.as_ptr().cast::<[u64; 4]>() };
+        let input = words[12] as u32;
+        let cached = (words[12] >> 32) as u32;
+        let output = words[13] as u32;
+        let speed = (words[13] >> 32) as u16;
+        let privacy = (words[13] >> 48) as u8;
+        let active = (words[13] >> 56) as u8;
+        if active != 1
+            || (r.private && privacy != 1)
+            || u32::from(speed) < min_speed
+            || state[2] as u32 >= (words[14] >> 32) as u32
+            || input > r.caps[0]
+            || cached > r.caps[1]
+            || output > r.caps[2]
         {
             continue;
         }
-        let input = rd32(t, 96);
-        let cached = rd32(t, 100);
-        let output = rd32(t, 104);
-        if input > r.caps[0] || cached > r.caps[1] || output > r.caps[2] {
-            continue;
-        }
-        let cached_tokens = if r.estimated_cached > 0 && t[..32] == r.cache_provider {
-            r.estimated_cached
+        let cached = r.estimated_cached > 0
+            && words[3] == cache_words[3]
+            && words[2] == cache_words[2]
+            && words[1] == cache_words[1]
+            && words[0] == cache_words[0];
+        let score = if cached {
+            fee(r.estimated_input - r.estimated_cached, input)
+                + fee(r.estimated_cached, (words[12] >> 32) as u32)
         } else {
-            0
-        };
-        let score = fee(r.estimated_input - cached_tokens, input)
-            + fee(cached_tokens, cached)
-            + fee(r.estimated_output, output);
+            fee(r.estimated_input, input)
+        } + fee(r.estimated_output, output);
         // scores fit u64; ascending slots preserve lower-slot ties and permit safe score pruning.
         if score >= best.score {
+            continue;
+        }
+        if !(if cached {
+            cache_member
+        } else {
+            members.contains(provider)
+        }) {
             continue;
         }
         let reserve = fee(r.max_input, input) + fee(r.max_output, output) + 1;
         if reserve > r.spend {
             continue;
         }
-        let Some(exposure) = rd64(c, 8).checked_add(reserve) else {
-            continue;
-        };
-        if !collateral(exposure).is_ok_and(|needed| rd64(c, 0) >= needed) {
-            continue;
-        }
         best = Match {
             slot: slot as u32,
             reserve,
             score,
-            exposure,
             cache: false,
         };
         if score == 0 {

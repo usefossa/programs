@@ -1,7 +1,7 @@
 use crate::{
     abi::*,
     helpers::{fee, wr32, wr64},
-    matching::{select, Match, Request},
+    matching::{Match, Request},
     state::all_zero,
     CLAIM_SECONDS,
 };
@@ -34,7 +34,7 @@ fn wide(d: &[u8], i: usize) -> u64 {
 fn short(d: &[u8], i: usize) -> u16 {
     u16::from_le_bytes(d[i..i + 2].try_into().unwrap())
 }
-fn reference(t: &[u8], c: &[u8], p: &[u8], free: u64) -> Option<Match> {
+fn reference_list(t: &[u8], c: &[u8], p: &[u8], free: u64, providers: &[u8]) -> Option<Match> {
     let cost = |n: u32, rate: u32| (u128::from(n) * u128::from(rate)).div_ceil(1_000_000);
     let mut eligible = Vec::new();
     for index in 0..word(t, 44) as usize {
@@ -42,13 +42,11 @@ fn reference(t: &[u8], c: &[u8], p: &[u8], free: u64) -> Option<Match> {
         let state = 48 + index * 32;
         let prices = [word(t, at + 96), word(t, at + 100), word(t, at + 104)];
         if t[at + 111] != 1
-            || t[at + 112] != 1
             || (p[54] == 1 && t[at + 110] != 1)
             || short(t, at + 108) < short(p, 44)
             || u128::from(word(p, 50))
                 > (86_400 - CLAIM_SECONDS) as u128 * u128::from(short(t, at + 108))
             || word(c, state + 16) >= word(t, at + 116)
-            || word(c, state + 20) == u32::MAX
             || (0..3).any(|j| prices[j] > word(p, 32 + j * 4))
         {
             continue;
@@ -57,8 +55,7 @@ fn reference(t: &[u8], c: &[u8], p: &[u8], free: u64) -> Option<Match> {
         if reserve > u128::from(free) || reserve > u128::from(wide(p, 55)) {
             continue;
         }
-        let exposure = u128::from(wide(c, state + 8)) + reserve;
-        if exposure + exposure.div_ceil(100) > u128::from(wide(c, state)) {
+        if !providers.chunks_exact(32).any(|key| key == &t[at..at + 32]) {
             continue;
         }
         let cache = t[at..at + 32] == p[75..107];
@@ -70,7 +67,6 @@ fn reference(t: &[u8], c: &[u8], p: &[u8], free: u64) -> Option<Match> {
             slot: index as u32,
             reserve: reserve as u64,
             score: score as u64,
-            exposure: exposure as u64,
             cache,
         });
     }
@@ -138,14 +134,14 @@ fn zero_score_keeps_first_fully_eligible_tie_and_checks_reserves() {
     wr32(&mut p, 71, 0);
     p[75..107].fill(7);
     t[HEADER_LEN + 111] = 0;
-    t[HEADER_LEN + TERMS_LEN + 112] = 0;
+    t[HEADER_LEN + TERMS_LEN + 111] = 0;
     wr32(&mut c, HEADER_LEN + 3 * CAPACITY_LEN + 16, 2);
-    wr64(&mut c, HEADER_LEN + 4 * CAPACITY_LEN, 0);
-    wr64(&mut c, HEADER_LEN + 5 * CAPACITY_LEN + 8, u64::MAX);
+    wr32(&mut c, HEADER_LEN + 4 * CAPACITY_LEN + 16, 2);
+    wr32(&mut c, HEADER_LEN + 5 * CAPACITY_LEN + 16, 2);
     let actual = select(&t, &c, &Request::parse(&p, u64::MAX).unwrap()).unwrap();
     assert_eq!((actual.slot, actual.score, actual.cache), (6, 0, true));
     assert_eq!(Some(actual), reference(&t, &c, &p, u64::MAX));
-    wr32(&mut c, HEADER_LEN + 6 * CAPACITY_LEN + 20, u32::MAX);
+    wr32(&mut c, HEADER_LEN + 6 * CAPACITY_LEN + 16, 2);
     let actual = select(&t, &c, &Request::parse(&p, u64::MAX).unwrap()).unwrap();
     assert_eq!((actual.slot, actual.score), (7, 0));
     assert_eq!(Some(actual), reference(&t, &c, &p, u64::MAX));
@@ -268,8 +264,12 @@ fn randomized_matcher_matches_independent_sorted_u128_reference() {
                 wr32(&mut c, ci + 20, 0);
             }
         }
-        let actual = select(&t, &c, &Request::parse(&p, free).unwrap()).ok();
-        let expected = reference(&t, &c, &p, free);
+        let providers: Vec<u8> = (1..=9u8)
+            .filter(|_| rng.to(3) > 0)
+            .flat_map(|key| [key; 32])
+            .collect();
+        let actual = select_on_list(&t, &c, &providers, &Request::parse(&p, free).unwrap()).ok();
+        let expected = reference_list(&t, &c, &p, free, &providers);
         assert_eq!(actual, expected, "seeded case {case}");
         matched += usize::from(actual.is_some());
         cached_winners += usize::from(actual.is_some_and(|m| m.cache));
@@ -318,4 +318,160 @@ fn maximum_book_scan_ignores_unregistered_tail_and_rejects_oversized_count() {
     wr32(&mut terms, 44, MAX_ENTRIES as u32 + 1);
     wr32(&mut capacity, 44, MAX_ENTRIES as u32 + 1);
     assert!(select(&terms, &capacity, &request).is_err());
+}
+
+fn all_providers() -> std::vec::Vec<u8> {
+    (1..=255u8).flat_map(|key| [key; 32]).collect()
+}
+fn select(t: &[u8], c: &[u8], r: &Request) -> Result<Match, pinocchio::error::ProgramError> {
+    select_on_list(t, c, &all_providers(), r)
+}
+
+fn reference(t: &[u8], c: &[u8], p: &[u8], free: u64) -> Option<Match> {
+    reference_list(t, c, p, free, &all_providers())
+}
+
+#[test]
+fn list_membership_excludes_cheaper_offers_and_preserves_listed_ties() {
+    let (terms, capacity, payload) = matcher_fixture(&[100, 100, 100]);
+    let request = Request::parse(&payload, u64::MAX).unwrap();
+    assert!(select_on_list(&terms, &capacity, &[], &request).is_err());
+    assert_eq!(
+        select_on_list(&terms, &capacity, &[2; 32], &request)
+            .unwrap()
+            .slot,
+        1
+    );
+    assert_eq!(
+        select_on_list(&terms, &capacity, &[3; 32], &request)
+            .unwrap()
+            .slot,
+        2
+    );
+    assert!(select_on_list(&terms, &capacity, &[4; 32], &request).is_err());
+    let keys = [[2; 32], [3; 32]].concat();
+    assert_eq!(
+        select_on_list(&terms, &capacity, &keys, &request)
+            .unwrap()
+            .slot,
+        1
+    );
+}
+
+#[test]
+fn sorted_membership_search_matches_independent_linear_search() {
+    for count in 0..=255 {
+        let keys: Vec<u8> = (1..=255u8).take(count).flat_map(|key| [key; 32]).collect();
+        for key in 0..=255u8 {
+            let expected = keys
+                .chunks_exact(32)
+                .position(|candidate| candidate == [key; 32]);
+            assert_eq!(
+                crate::instructions::list::position(&keys, &[key; 32]).ok(),
+                expected
+            );
+        }
+    }
+}
+
+fn select_on_list(
+    t: &[u8],
+    c: &[u8],
+    keys: &[u8],
+    r: &Request,
+) -> Result<Match, pinocchio::error::ProgramError> {
+    let count = keys.len() / 32;
+    let mut list = std::vec![0;provider_list_len(count.max(1))];
+    wr32(&mut list, 72, count.max(1) as u32);
+    wr32(&mut list, 76, count as u32);
+    list[80..80 + keys.len()].copy_from_slice(keys);
+    crate::instructions::list::rebuild(&mut list);
+    crate::matching::select(t, c, &list, r)
+}
+
+#[test]
+fn persistent_membership_matches_sorted_keys_for_tree_boundaries_and_adversarial_prefixes() {
+    use crate::instructions::list::{rebuild, Members};
+    let mut random = 0x123456789abcdef0u64;
+    for count in [0, 1, 2, 3, 4, 5, 6, 127, 128, 129, 4095, 4096] {
+        for mode in 0..5 {
+            let mut keys = Vec::new();
+            for index in 0..count {
+                let mut key = [0u8; 32];
+                for word in 0..4 {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    if mode == 0 {
+                        key[word * 8..word * 8 + 8].copy_from_slice(&random.to_le_bytes());
+                    }
+                }
+                if mode != 0 {
+                    let offset = match mode {
+                        1 => 28,
+                        2 => 0,
+                        3 => (index % 8) * 4,
+                        _ => 28,
+                    };
+                    key[offset..offset + 4].copy_from_slice(&(index as u32 * 4 + 4).to_be_bytes());
+                    if mode == 4 && index >= count.saturating_sub(7) {
+                        key[index % 28] = 1;
+                    }
+                }
+                keys.push(key);
+            }
+            keys.sort_unstable();
+            keys.dedup();
+            assert_eq!(keys.len(), count);
+            let limit = count.max(1);
+            let mut data = std::vec![0; provider_list_len(limit)];
+            assert_eq!(data.as_ptr() as usize & 7, 0);
+            wr32(&mut data, 72, limit as u32);
+            wr32(&mut data, 76, count as u32);
+            for (index, key) in keys.iter().enumerate() {
+                data[80 + index * 32..112 + index * 32].copy_from_slice(key);
+            }
+            rebuild(&mut data);
+            let members = Members::new(&data);
+            let check = |key: &[u8; 32]| {
+                let aligned: [u64; 4] = core::array::from_fn(|i| {
+                    u64::from_le_bytes(key[i * 8..i * 8 + 8].try_into().unwrap())
+                });
+                let bytes =
+                    unsafe { core::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), 32) };
+                assert_eq!(
+                    members.contains(bytes),
+                    keys.binary_search(key).is_ok(),
+                    "count={count} mode={mode} key={key:?}"
+                );
+            };
+            check(&[0; 32]);
+            check(&[255; 32]);
+            for key in &keys {
+                check(key);
+                for word in 0..4 {
+                    let mut absent = *key;
+                    absent[word * 8 + 7] ^= 1;
+                    check(&absent);
+                }
+            }
+            fn inorder(d: &[u8], keys: &[[u8; 32]], limit: usize, node: usize, at: &mut usize) {
+                if node >= keys.len() {
+                    return;
+                }
+                inorder(d, keys, limit, node * 2 + 1, at);
+                for word in 0..4 {
+                    let got = wide(d, 80 + limit * 32 + node * 32 + word * 8);
+                    assert_eq!(
+                        got,
+                        u64::from_be_bytes(keys[*at][word * 8..word * 8 + 8].try_into().unwrap())
+                    );
+                }
+                *at += 1;
+                inorder(d, keys, limit, node * 2 + 2, at);
+            }
+            inorder(&data, &keys, limit, 0, &mut 0);
+            assert!(data[80 + limit * 32 + count * 32..].iter().all(|x| *x == 0));
+        }
+    }
 }

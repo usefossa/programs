@@ -1,7 +1,7 @@
 use crate::{
     abi::*,
-    helpers::{collateral, fee, wr32, wr64},
-    matching::{select, Request},
+    helpers::{fee, wr32, wr64},
+    matching::{Match, Request},
 };
 use std::vec;
 
@@ -57,8 +57,6 @@ fn split_rounding_and_maximum_arithmetic() {
         fee(u32::MAX, u32::MAX),
         (u128::from(u32::MAX).pow(2)).div_ceil(u128::from(UNIT)) as u64
     );
-    assert_eq!(collateral(101).unwrap(), 103);
-    assert!(collateral(u64::MAX).is_err());
 }
 #[test]
 fn multidimensional_score_cache_provenance_and_ties() {
@@ -89,28 +87,23 @@ fn multidimensional_score_cache_provenance_and_ties() {
     assert_eq!((chosen.slot, chosen.score, chosen.cache), (0, 100, false));
 }
 #[test]
-fn eligibility_excludes_every_unfunded_or_disallowed_candidate() {
+fn eligibility_applies_capacity_and_terms_without_legacy_admission_or_collateral() {
     let (t, c) = books(&[[1, 1, 1], [2, 2, 2]]);
     let p = payload();
     let r = Request::parse(&p, u64::MAX).unwrap();
-    for offset in [111, 112] {
-        let mut changed = t.clone();
-        changed[HEADER_LEN + offset] = 0;
-        assert_eq!(select(&changed, &c, &r).unwrap().slot, 1);
-    }
+    let mut changed = t.clone();
+    changed[HEADER_LEN + 111] = 0;
+    assert_eq!(select(&changed, &c, &r).unwrap().slot, 1);
     let mut changed = c.clone();
-    wr32(&mut changed, HEADER_LEN + 20, u32::MAX);
-    assert_eq!(select(&t, &changed, &r).unwrap().slot, 1);
-    wr32(&mut changed, HEADER_LEN + 20, 0);
     wr32(&mut changed, HEADER_LEN + 16, 2);
     assert_eq!(select(&t, &changed, &r).unwrap().slot, 1);
     wr32(&mut changed, HEADER_LEN + 16, 0);
-    wr64(&mut changed, HEADER_LEN, 3);
-    assert_eq!(select(&t, &changed, &r).unwrap().slot, 1);
-    wr64(&mut changed, HEADER_LEN, 4);
-    assert_eq!(select(&t, &changed, &r).unwrap().slot, 0);
+    wr64(&mut changed, HEADER_LEN, 0);
     wr64(&mut changed, HEADER_LEN + 8, u64::MAX);
-    assert_eq!(select(&t, &changed, &r).unwrap().slot, 1);
+    wr32(&mut changed, HEADER_LEN + 20, u32::MAX);
+    let mut terms = t.clone();
+    terms[HEADER_LEN + 112] = 0;
+    assert_eq!(select(&terms, &changed, &r).unwrap().slot, 0);
     let mut q = p;
     q[54] = 1;
     let mut changed = t.clone();
@@ -150,14 +143,24 @@ fn request_bounds_and_book_count() {
     wr32(&mut c, 44, 0);
     assert!(select(&t, &c, &Request::parse(&payload(), 100).unwrap()).is_err());
 }
-#[test]
-fn funding_survives_partial_refunds_and_pending_unbond() {
-    for a in 0..150u64 {
-        for b in 0..150u64 {
-            let funded = collateral(a + b).unwrap();
-            for refund in [0, a / 2, a] {
-                assert!(funded - refund >= collateral(b).unwrap());
-            }
-        }
-    }
+fn all_providers() -> std::vec::Vec<u8> {
+    (1..=255u8).flat_map(|key| [key; 32]).collect()
+}
+fn select(t: &[u8], c: &[u8], r: &Request) -> Result<Match, pinocchio::error::ProgramError> {
+    select_on_list(t, c, &all_providers(), r)
+}
+
+fn select_on_list(
+    t: &[u8],
+    c: &[u8],
+    keys: &[u8],
+    r: &Request,
+) -> Result<Match, pinocchio::error::ProgramError> {
+    let count = keys.len() / 32;
+    let mut list = std::vec![0;provider_list_len(count.max(1))];
+    wr32(&mut list, 72, count.max(1) as u32);
+    wr32(&mut list, 76, count as u32);
+    list[80..80 + keys.len()].copy_from_slice(keys);
+    crate::instructions::list::rebuild(&mut list);
+    crate::matching::select(t, c, &list, r)
 }

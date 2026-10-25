@@ -1,21 +1,18 @@
 [package]
 name = "inference-router-program"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["receipt-prototype"]
+default = []
 no-entrypoint = []
 local-test = []
-receipt-prototype = []
+legacy-migration = []
 
 [dependencies]
-pinocchio = "0.11.2"
+pinocchio = { version = "0.11.2", features = ["account-resize"] }
 pinocchio-system = "0.6.1"
 pinocchio-token = "0.7.0"
-
-[target.'cfg(not(target_os = "solana"))'.dependencies]
-sha2 = "0.10"

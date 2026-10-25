@@ -5,8 +5,8 @@ use crate::{
     },
     helpers::{err, rd32, require, wr32},
     state::{
-        approved_provider, fresh, initialize_pda, market, metadata_payload, model, state, writable,
-        write_metadata,
+        fresh, initialize_pda, market, metadata_payload, model, registered_provider, state,
+        writable, write_metadata,
     },
 };
 use pinocchio::{cpi::Signer, instruction::seeds, AccountView, Address, ProgramResult};
@@ -38,8 +38,6 @@ pub(crate) fn initialize_model(
     accounts: &mut [AccountView],
     p: &[u8],
 ) -> ProgramResult {
-    require(accounts.len() == 9 || accounts.len() == 10, 3)?;
-    let (accounts, extra) = accounts.split_at_mut(9);
     let [m, mo, t, c, provider, payer, system, profile, metadata] = accounts else {
         return Err(err(3));
     };
@@ -48,13 +46,8 @@ pub(crate) fn initialize_model(
         3,
     )?;
     metadata_payload(&p[36..])?;
-    let md = market(m, program)?;
-    let admin = extra.first().unwrap_or(provider);
-    require(
-        admin.is_signer() && &md[8..40] == admin.address().as_ref(),
-        4,
-    )?;
-    approved_provider(profile, provider, m.address(), program)?;
+    market(m, program)?;
+    registered_provider(profile, provider, m.address(), program)?;
     let limit = rd32(p, 32) as usize;
     require((1..=MAX_ENTRIES).contains(&limit), 3)?;
     require(t.address() != c.address(), 2)?;
@@ -149,5 +142,44 @@ pub(crate) fn update_metadata(
     )?;
     drop(d);
     write_metadata(&mut metadata.try_borrow_mut()?, 104, 140, p);
+    Ok(())
+}
+
+pub(crate) fn grow(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
+    use pinocchio::{
+        sysvars::{rent::Rent, Sysvar},
+        Resize,
+    };
+    use pinocchio_system::instructions::Transfer;
+    let [m, mo, t, c, payer, system] = accounts else {
+        return Err(err(3));
+    };
+    require(p.len() == 4 && system.address() == &pinocchio_system::ID, 3)?;
+    require(payer.is_signer(), 4)?;
+    writable(&[mo, t, c, payer])?;
+    market(m, program)?;
+    let md = model(mo, program, m.address())?;
+    let old = rd32(&md, 136) as usize;
+    let limit = rd32(p, 0) as usize;
+    require(limit > old && limit <= MAX_ENTRIES && limit - old <= 85, 3)?;
+    let td = crate::state::book(t, program, mo, &md, true)?;
+    let cd = crate::state::book(c, program, mo, &md, false)?;
+    require(rd32(&td, 44) == rd32(&cd, 44), 2)?;
+    drop((td, cd, md));
+    let rent = Rent::get()?;
+    for (account, len) in [(t, terms_book_len(limit)), (c, capacity_book_len(limit))] {
+        let minimum = rent.try_minimum_balance(len)?;
+        if account.lamports() < minimum {
+            Transfer {
+                from: payer,
+                to: account,
+                lamports: minimum - account.lamports(),
+            }
+            .invoke()?;
+        }
+        account.resize(len)?;
+        wr32(&mut account.try_borrow_mut()?, 40, limit as u32);
+    }
+    wr32(&mut mo.try_borrow_mut()?, 136, limit as u32);
     Ok(())
 }
