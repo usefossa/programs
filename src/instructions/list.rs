@@ -237,18 +237,30 @@ pub(crate) fn update(program: &Address, accounts: &mut [AccountView], p: &[u8]) 
 }
 
 pub(crate) fn close(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [list, authority] = accounts else {
+    let [list, authority, metadata] = accounts else {
         return Err(err(3));
     };
     require(p.is_empty() && list.address() != authority.address(), 3)?;
-    writable(&[list, authority])?;
+    writable(&[list, authority, metadata])?;
     let d = state(list, program)?;
     require(
         authority.is_signer() && &d[40..72] == authority.address().as_ref(),
         4,
     )?;
     require(rd32(&d, 76) == 0, 7)?;
+    let bump = super::list_metadata::canonical(metadata, list, program)?;
+    let has_metadata = metadata.owner() != &pinocchio_system::ID || metadata.data_len() != 0;
+    if has_metadata {
+        super::list_metadata::validate(metadata, list, &d, program, bump)?;
+    }
     drop(d);
-    authority.set_lamports(add(authority.lamports(), list.lamports())?);
+    let refund = add(
+        list.lamports(),
+        if has_metadata { metadata.lamports() } else { 0 },
+    )?;
+    authority.set_lamports(add(authority.lamports(), refund)?);
+    if has_metadata {
+        metadata.close()?;
+    }
     list.close()
 }

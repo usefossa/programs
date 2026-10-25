@@ -1,6 +1,7 @@
 #[path = "../../support/scenarios.rs"]
 mod scenarios;
 fn main() {
+    scenarios::list_metadata();
     let legacy = std::env::var_os("FOSSA_LEGACY_TOKEN").is_some();
     scenarios::run(legacy);
     scenarios::growth();

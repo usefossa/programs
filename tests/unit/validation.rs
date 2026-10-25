@@ -75,7 +75,11 @@ fn metadata_accepts_utf8_byte_boundaries_and_rejects_all_ascii_controls() {
 
 #[test]
 fn shorter_metadata_updates_clear_stale_bytes_and_preserve_account_identity() {
-    for (size, hash, uri) in [(PROVIDER_LEN, 72, 108), (MODEL_METADATA_LEN, 104, 140)] {
+    for (size, hash, uri) in [
+        (PROVIDER_LEN, 72, 108),
+        (MODEL_METADATA_LEN, 104, 140),
+        (LIST_METADATA_LEN, 104, 140),
+    ] {
         let mut account = vec![0x55; size];
         for length in (1..=URI_MAX).rev() {
             let mut payload = vec![0x99; 32];

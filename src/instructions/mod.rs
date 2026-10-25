@@ -1,5 +1,6 @@
 pub(crate) mod booking;
 pub(crate) mod list;
+pub(crate) mod list_metadata;
 pub(crate) mod market;
 pub(crate) mod provider;
 pub(crate) mod user;

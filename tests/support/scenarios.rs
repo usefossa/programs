@@ -210,6 +210,9 @@ struct Fixture {
     list: Keypair,
     manager: Keypair,
 }
+fn list_metadata_address(v: &Vm, list: Address) -> Address {
+    Address::find_program_address(&[b"list_metadata", list.as_ref()], &v.program).0
+}
 fn metadata() -> Vec<u8> {
     let mut p = vec![1; 32];
     p.extend_from_slice(b"https://example.test/model.json");
@@ -550,7 +553,11 @@ pub fn run(legacy_token: bool) {
     v.send(
         30,
         &[],
-        vec![w(f.list.pubkey()), ws(f.manager.pubkey())],
+        vec![
+            w(f.list.pubkey()),
+            ws(f.manager.pubkey()),
+            w(list_metadata_address(&v, f.list.pubkey())),
+        ],
         &[&f.manager],
         false,
     );
@@ -783,14 +790,22 @@ pub fn run(legacy_token: bool) {
     v.send(
         30,
         &[],
-        vec![w(f.list.pubkey()), ws(f.owner.pubkey())],
+        vec![
+            w(f.list.pubkey()),
+            ws(f.owner.pubkey()),
+            w(list_metadata_address(&v, f.list.pubkey())),
+        ],
         &[&f.owner],
         false,
     );
     v.send(
         30,
         &[],
-        vec![w(f.list.pubkey()), ws(f.manager.pubkey())],
+        vec![
+            w(f.list.pubkey()),
+            ws(f.manager.pubkey()),
+            w(list_metadata_address(&v, f.list.pubkey())),
+        ],
         &[&f.manager],
         true,
     );
@@ -1176,4 +1191,270 @@ pub fn growth() {
     v.send(32, &89u32.to_le_bytes(), accounts.clone(), &[&payer], false);
     let next = v.send(32, &90u32.to_le_bytes(), accounts, &[&payer], true);
     println!("permissionless growth preserved entries/metadata/user and zeroed extension: 85slots={cu} one_slot={next}; bounds, foreign accounts, readonly, signer and payer failures rollback");
+}
+
+pub fn list_metadata() {
+    let mut v = Vm::new(false, false);
+    let f = setup(&mut v);
+    let list = f.list.pubkey();
+    let authority = f.manager.pubkey();
+    let profile = list_metadata_address(&v, list);
+    let sponsor = Keypair::new();
+    v.svm.airdrop(&sponsor.pubkey(), 50_000_000).unwrap();
+    let init = vec![
+        r(f.market),
+        r(list),
+        w(profile),
+        s(authority),
+        ws(sponsor.pubkey()),
+        r(SYSTEM),
+    ];
+    let update = vec![r(f.market), r(list), w(profile), s(authority)];
+    let close = vec![w(list), ws(authority), w(profile)];
+    let signers = [&f.manager, &sponsor];
+    let payload = metadata();
+    let list_before = v.data(list);
+    v.send(34, &payload, update.clone(), &[&f.manager], false);
+    for index in [2, 4] {
+        let mut invalid = init.clone();
+        invalid[index].is_writable = false;
+        v.send(33, &payload, invalid, &signers, false);
+    }
+    for index in [3, 4] {
+        let mut invalid = init.clone();
+        invalid[index].is_signer = false;
+        let keys = if index == 3 {
+            vec![&sponsor]
+        } else {
+            vec![&f.manager]
+        };
+        v.send(33, &payload, invalid, &keys, false);
+    }
+    for index in [0, 1, 2, 5] {
+        let mut invalid = init.clone();
+        invalid[index].pubkey = key();
+        v.send(33, &payload, invalid, &signers, false);
+    }
+    let mut invalid = init.clone();
+    invalid[3] = s(f.owner.pubkey());
+    v.send(33, &payload, invalid, &[&f.owner, &sponsor], false);
+    let mut wrong_market = list_before.clone();
+    wrong_market[8..40].fill(9);
+    v.replace(list, wrong_market);
+    v.send(33, &payload, init.clone(), &signers, false);
+    v.replace(list, list_before.clone());
+    for invalid in [
+        vec![],
+        vec![0; 32],
+        vec![0; 289],
+        [vec![1; 32], vec![0xff]].concat(),
+        [vec![1; 32], b"x y".to_vec()].concat(),
+    ] {
+        v.send(33, &invalid, init.clone(), &signers, false);
+    }
+    for count in [5, 7] {
+        let mut invalid = init.clone();
+        invalid.resize(count, r(f.mint));
+        v.send(33, &payload, invalid, &signers, false);
+    }
+    for (owner, data) in [
+        (v.program, vec![]),
+        (key(), vec![]),
+        (SYSTEM, vec![0]),
+        (v.program, vec![0; LIST_METADATA_LEN]),
+    ] {
+        v.put(profile, owner, data);
+        v.send(33, &payload, init.clone(), &signers, false);
+        v.send(30, &[], close.clone(), &[&f.manager], false);
+    }
+    // donated lamports do not block initialization; only the rent deficit is charged.
+    v.put(profile, SYSTEM, vec![]);
+    let prefunded = v.svm.get_account(&profile).unwrap().lamports;
+    let sponsor_before = v.svm.get_account(&sponsor.pubkey()).unwrap().lamports;
+    let rent = v.svm.minimum_balance_for_rent_exemption(LIST_METADATA_LEN);
+    let init_cu = v.send(33, &payload, init.clone(), &signers, true);
+    assert_eq!(
+        v.svm.get_account(&sponsor.pubkey()).unwrap().lamports,
+        sponsor_before - (rent - prefunded)
+    );
+    let original = v.svm.get_account(&profile).unwrap();
+    let d = &original.data;
+    assert_eq!(d.len(), LIST_METADATA_LEN);
+    assert_eq!(&d[..8], LIST_METADATA_MAGIC);
+    assert_eq!(&d[8..40], f.market.as_ref());
+    assert_eq!(&d[40..72], list.as_ref());
+    assert_eq!(&d[72..104], authority.as_ref());
+    assert_eq!(&d[104..136], &payload[..32]);
+    assert_eq!(
+        d[138],
+        Address::find_program_address(&[b"list_metadata", list.as_ref()], &v.program).1
+    );
+    assert_eq!(d[139], 0);
+    assert_eq!(v.data(list), list_before);
+    v.send(33, &payload, init, &signers, false);
+    for index in [0, 1, 2, 3] {
+        let mut invalid = update.clone();
+        invalid[index] = if index == 3 {
+            s(f.owner.pubkey())
+        } else {
+            r(key())
+        };
+        let signer = if index == 3 { &f.owner } else { &f.manager };
+        v.send(34, &payload, invalid, &[signer], false);
+    }
+    let mut invalid = update.clone();
+    invalid[3].is_signer = false;
+    v.send(34, &payload, invalid, &[], false);
+    let mut invalid = update.clone();
+    invalid[2].is_writable = false;
+    v.send(34, &payload, invalid, &[&f.manager], false);
+    for count in [3, 5] {
+        let mut invalid = update.clone();
+        invalid.resize(count, r(f.mint));
+        let keys = if count == 3 { vec![] } else { vec![&f.manager] };
+        v.send(34, &payload, invalid, &keys, false);
+    }
+    for invalid in [
+        vec![],
+        vec![0; 32],
+        vec![0; 289],
+        [vec![1; 32], b"x\ny".to_vec()].concat(),
+    ] {
+        v.send(34, &invalid, update.clone(), &[&f.manager], false);
+    }
+    // account identity and malformed stored metadata fail closed for updates and closure.
+    for at in [0, 8, 40, 72, 138, 139, 140, LIST_METADATA_LEN - 1] {
+        let mut corrupt = original.clone();
+        corrupt.data[at] ^= 0xff;
+        v.svm.set_account(profile, corrupt).unwrap();
+        v.send(34, &payload, update.clone(), &[&f.manager], false);
+        v.send(30, &[], close.clone(), &[&f.manager], false);
+    }
+    for length in [0u16, 257, u16::MAX] {
+        let mut corrupt = original.clone();
+        corrupt.data[136..138].copy_from_slice(&length.to_le_bytes());
+        v.svm.set_account(profile, corrupt).unwrap();
+        v.send(34, &payload, update.clone(), &[&f.manager], false);
+        v.send(30, &[], close.clone(), &[&f.manager], false);
+    }
+    for (owner, length) in [
+        (key(), LIST_METADATA_LEN),
+        (SYSTEM, LIST_METADATA_LEN),
+        (v.program, LIST_METADATA_LEN - 1),
+        (v.program, LIST_METADATA_LEN + 1),
+    ] {
+        let mut corrupt = original.clone();
+        corrupt.owner = owner;
+        corrupt.data.resize(length, 0);
+        v.svm.set_account(profile, corrupt).unwrap();
+        v.send(34, &payload, update.clone(), &[&f.manager], false);
+        v.send(30, &[], close.clone(), &[&f.manager], false);
+    }
+    v.svm.set_account(profile, original.clone()).unwrap();
+    let mut longest = vec![2; 32];
+    longest.extend_from_slice("é".repeat(128).as_bytes());
+    let update_cu = v.send(34, &longest, update.clone(), &[&f.manager], true);
+    let shortest = [vec![0; 32], vec![b'x']].concat();
+    v.send(34, &shortest, update, &[&f.manager], true);
+    let d = v.data(profile);
+    assert_eq!(&d[..104], &original.data[..104]);
+    assert_eq!(&d[104..136], &[0; 32]);
+    assert_eq!(&d[136..138], &[1, 0]);
+    assert_eq!(&d[138..140], &original.data[138..140]);
+    assert_eq!(d[140], b'x');
+    assert!(d[141..].iter().all(|b| *b == 0));
+    assert_eq!(v.data(list), list_before);
+    member(&mut v, &f, f.providers[0].pubkey(), true, true);
+    v.send(30, &[], close.clone(), &[&f.manager], false);
+    member(&mut v, &f, f.providers[0].pubkey(), false, true);
+    for index in [0, 1, 2] {
+        let mut invalid = close.clone();
+        invalid[index].is_writable = false;
+        v.send(30, &[], invalid, &[&f.manager], false);
+    }
+    let mut invalid = close.clone();
+    invalid[1].is_signer = false;
+    v.send(30, &[], invalid, &[], false);
+    let mut invalid = close.clone();
+    invalid[2].pubkey = key();
+    v.send(30, &[], invalid, &[&f.manager], false);
+    v.send(30, &[], close[..2].to_vec(), &[&f.manager], false);
+    v.send(30, &[0], close.clone(), &[&f.manager], false);
+    let authority_before = v.svm.get_account(&authority).unwrap().lamports;
+    let sponsor_before = v.svm.get_account(&sponsor.pubkey()).unwrap().lamports;
+    let list_rent = v.svm.get_account(&list).unwrap().lamports;
+    let close_cu = v.send(30, &[], close, &[&f.manager], true);
+    assert_eq!(
+        v.svm.get_account(&authority).unwrap().lamports,
+        authority_before + list_rent + rent
+    );
+    assert_eq!(
+        v.svm.get_account(&sponsor.pubkey()).unwrap().lamports,
+        sponsor_before
+    );
+    assert!(v.svm.get_account(&profile).is_none_or(|a| a.lamports == 0));
+    assert!(v.svm.get_account(&list).is_none_or(|a| a.lamports == 0));
+    // legacy lists without metadata also close when the canonical PDA has system-owned dust.
+    v.blank(&f.list, provider_list_len(4));
+    v.send(
+        28,
+        &4u32.to_le_bytes(),
+        vec![r(f.market), ws(list), s(authority)],
+        &[&f.list, &f.manager],
+        true,
+    );
+    v.put(profile, SYSTEM, vec![]);
+    let dust = v.svm.get_account(&profile).unwrap();
+    v.send(
+        30,
+        &[],
+        vec![w(list), ws(authority), w(profile)],
+        &[&f.manager],
+        true,
+    );
+    let after = v.svm.get_account(&profile).unwrap();
+    assert_eq!(after.lamports, dust.lamports);
+    assert_eq!(after.owner, dust.owner);
+    assert!(after.data.is_empty());
+    let maximum = Keypair::new();
+    let maximum_profile = list_metadata_address(&v, maximum.pubkey());
+    let len = provider_list_len(MAX_ENTRIES);
+    let mut create = 0u32.to_le_bytes().to_vec();
+    create.extend_from_slice(&v.svm.minimum_balance_for_rent_exemption(len).to_le_bytes());
+    create.extend_from_slice(&(len as u64).to_le_bytes());
+    create.extend_from_slice(v.program.as_ref());
+    let mut initialize = vec![28];
+    initialize.extend_from_slice(&(MAX_ENTRIES as u32).to_le_bytes());
+    let combined_cu = v.send_with_prefix(
+        33,
+        &longest,
+        vec![
+            r(f.market),
+            r(maximum.pubkey()),
+            w(maximum_profile),
+            s(authority),
+            ws(sponsor.pubkey()),
+            r(SYSTEM),
+        ],
+        &[&maximum, &f.manager, &sponsor],
+        true,
+        vec![
+            Instruction {
+                program_id: SYSTEM,
+                accounts: vec![ws(v.payer.pubkey()), ws(maximum.pubkey())],
+                data: create,
+            },
+            Instruction {
+                program_id: v.program,
+                accounts: vec![r(f.market), ws(maximum.pubkey()), s(authority)],
+                data: initialize,
+            },
+        ],
+    );
+    assert!(
+        combined_cu < 250_000,
+        "maximum list and metadata creation exceeds CLI budget: {combined_cu}"
+    );
+    println!("maximum list creation plus 256-byte metadata URI: {combined_cu} CU");
+    println!("list metadata passed: executions={} init_cu={init_cu} update_cu={update_cu} close_cu={close_cu}; authority, sponsor, prefunding, malformed accounts, atomic rent cleanup, legacy closure", v.executions);
 }

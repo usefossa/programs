@@ -1,6 +1,7 @@
 #[path = "../../support/scenarios.rs"]
 mod scenarios;
 fn main() {
+    scenarios::list_metadata();
     scenarios::scale();
     scenarios::growth();
     scenarios::run(false);
@@ -33,4 +34,9 @@ fn maximum_list_and_descending_book() {
 #[test]
 fn permissionless_book_growth() {
     scenarios::growth();
+}
+
+#[test]
+fn authority_controlled_list_metadata() {
+    scenarios::list_metadata();
 }

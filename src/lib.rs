@@ -52,6 +52,8 @@ pub fn process_instruction(
         29 => instructions::list::update(program, accounts, p),
         30 => instructions::list::close(program, accounts, p),
         32 => instructions::market::grow(program, accounts, p),
+        33 => instructions::list_metadata::initialize(program, accounts, p),
+        34 => instructions::list_metadata::update(program, accounts, p),
         #[cfg(feature = "legacy-migration")]
         31 => migration::sweep(program, accounts, p),
         _ => Err(err(3)),

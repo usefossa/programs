@@ -6,6 +6,7 @@ pub const MODEL_LEN: usize = 144;
 pub const URI_MAX: usize = 256;
 pub const PROVIDER_LEN: usize = 108 + URI_MAX;
 pub const MODEL_METADATA_LEN: usize = 140 + URI_MAX;
+pub const LIST_METADATA_LEN: usize = 140 + URI_MAX;
 pub const USER_LEN: usize = 120;
 pub const BOOKING_LEN: usize = 368;
 pub const HEADER_LEN: usize = 48;
@@ -23,6 +24,7 @@ pub const TERMS_MAGIC: &[u8; 8] = b"TERMSV20";
 pub const CAPACITY_MAGIC: &[u8; 8] = b"CAPACV20";
 pub const BOOK_MAGIC: &[u8; 8] = b"BOOK0V20";
 pub const LIST_MAGIC: &[u8; 8] = b"LIST0V30";
+pub const LIST_METADATA_MAGIC: &[u8; 8] = b"LMETAV30";
 
 // market: magic0, creator8[32], mint40[32]; immutable.
 // model: magic0, market8[32], model_id40[32], terms72[32], capacity104[32], limit136:u32, bump140:u8.
@@ -31,6 +33,8 @@ pub const LIST_MAGIC: &[u8; 8] = b"LIST0V30";
 // document_sha25672[32], uri_len104:u16, reserved106:u8, bump107:u8, uri108[256].
 // model metadata pda: [b"model_metadata", model]. magic0, market8[32], model40[32],
 // authority72[32], document_sha256104[32], uri_len136:u16, bump138:u8, reserved139:u8, uri140[256].
+// list metadata pda: [b"list_metadata", list]; same layout with list40[32] and list authority72[32].
+// profile is optional; list membership layout and matching do not depend on it.
 // metadata authorities are immutable. uri is 1..=256 utf-8 bytes without ascii controls/whitespace;
 // unused uri bytes zeroed. metadata payload: document_sha2560[32], uri32[remaining bytes].
 // metadata does not participate in matching or settlement. registration requires no admission authority.
@@ -85,9 +89,13 @@ pub const LIST_MAGIC: &[u8; 8] = b"LIST0V30";
 // 26 reusable booking: [market, user, owner(s), booking(ws), rent_payer(s)]; empty.
 // 28 list: [market, list(ws), authority(s)]; limit:u32; zeroed program-owned account preallocated.
 // 29 membership: [market, list(w), authority(s)]; provider[32], included:u8; duplicate add/missing remove reject.
-// 30 close list: [list(w), authority(ws)]; empty; list must be empty.
+// 30 close list: [list(w), authority(ws), list_metadata(w)]; empty; list must be empty.
+//   canonical metadata pda required; initialized metadata closes too, both rents go to authority.
+//   system-owned empty metadata pda accepted for legacy lists without profiles.
 // 32 grow: [market, model(w), terms(w), capacity(w), payer(ws), system_program]; new_limit:u32.
 //   increase only, at most85 slots per instruction, maximum4096; payer covers rent, data retained.
+// 33 list metadata: [market, list, list_metadata(w), authority(s), payer(ws), system_program]; metadata.
+// 34 update list metadata: [market, list, list_metadata(w), authority(s)]; metadata.
 // removed opcodes4,9,11,12,13,14,16,20,23,24,25,27 reject; never repurposed.
 
 pub const fn terms_book_len(limit: usize) -> usize {
