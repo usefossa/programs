@@ -41,14 +41,22 @@ pub(crate) fn market<'a>(
     a: &'a AccountView,
     program: &Address,
 ) -> Result<Ref<'a, [u8]>, ProgramError> {
-    state(a, program, MARKET_LEN, MARKET_MAGIC)
+    require(
+        a.data_len() == MARKET_LEN || a.data_len() == FEE_MARKET_LEN,
+        2,
+    )?;
+    state(a, program, a.data_len(), MARKET_MAGIC)
 }
 pub(crate) fn model<'a>(
     a: &'a AccountView,
     program: &Address,
     m: &Address,
 ) -> Result<Ref<'a, [u8]>, ProgramError> {
-    let d = state(a, program, MODEL_LEN, MODEL_MAGIC)?;
+    require(
+        a.data_len() == MODEL_LEN || a.data_len() == RESERVE_MODEL_LEN,
+        2,
+    )?;
+    let d = state(a, program, a.data_len(), MODEL_MAGIC)?;
     require(
         &d[8..40] == m.as_ref()
             && a.address()
@@ -182,7 +190,11 @@ pub(crate) fn booking<'a>(
     m: &Address,
     model: &Address,
 ) -> Result<Ref<'a, [u8]>, ProgramError> {
-    let d = state(a, program, BOOKING_LEN, BOOK_MAGIC)?;
+    require(
+        a.data_len() == BOOKING_LEN || a.data_len() == FEE_BOOKING_LEN,
+        2,
+    )?;
+    let d = state(a, program, a.data_len(), BOOK_MAGIC)?;
     require(
         &d[72..104] == m.as_ref() && &d[224..256] == model.as_ref(),
         2,

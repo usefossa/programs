@@ -26,6 +26,16 @@ pub(crate) fn ri64(b: &[u8], i: usize) -> i64 {
 pub(crate) fn wr32(b: &mut [u8], i: usize, v: u32) {
     b[i..i + 4].copy_from_slice(&v.to_le_bytes());
 }
+pub(crate) fn wr16(b: &mut [u8], i: usize, v: u16) {
+    b[i..i + 2].copy_from_slice(&v.to_le_bytes());
+}
+pub(crate) fn bps_ceil(amount: u64, bps: u16) -> u64 {
+    amount / 10_000 * u64::from(bps) + (amount % 10_000 * u64::from(bps)).div_ceil(10_000)
+}
+pub(crate) fn fee_budget(total: u64, bps: u16) -> u64 {
+    let denominator = 10_000 + u64::from(bps);
+    total / denominator * 10_000 + total % denominator * 10_000 / denominator
+}
 pub(crate) fn wr64(b: &mut [u8], i: usize, v: u64) {
     b[i..i + 8].copy_from_slice(&v.to_le_bytes());
 }

@@ -15,7 +15,7 @@ use helpers::err;
 use pinocchio::{AccountView, Address, ProgramResult};
 
 #[cfg(not(any(test, feature = "no-entrypoint")))]
-pinocchio::program_entrypoint!(process_instruction, 12);
+pinocchio::program_entrypoint!(process_instruction, 32);
 #[cfg(not(any(test, feature = "no-entrypoint")))]
 pinocchio::default_allocator!();
 #[cfg(not(any(test, feature = "no-entrypoint")))]
@@ -54,6 +54,15 @@ pub fn process_instruction(
         32 => instructions::market::grow(program, accounts, p),
         33 => instructions::list_metadata::initialize(program, accounts, p),
         34 => instructions::list_metadata::update(program, accounts, p),
+        35 => instructions::fees::configure(program, accounts, p),
+        36 => instructions::fees::configure_list(program, accounts, p),
+        37 => instructions::reserve::activate(program, accounts, p),
+        38 => instructions::reserve::configure(program, accounts, p),
+        39 => instructions::reserve::redeem(program, accounts, p),
+        40 => instructions::reserve::collect(program, accounts, p),
+        41 => instructions::reserve::sweep_empty(program, accounts, p),
+        42 => instructions::fees::configure_dex(program, accounts, p),
+        43 => instructions::fees::rotate_admin(program, accounts, p),
         #[cfg(feature = "legacy-migration")]
         31 => migration::sweep(program, accounts, p),
         _ => Err(err(3)),
@@ -71,3 +80,7 @@ mod matching_tests;
 #[cfg(test)]
 #[path = "../tests/unit/validation.rs"]
 mod validation_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/fees.rs"]
+mod fee_tests;

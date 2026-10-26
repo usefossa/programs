@@ -2,13 +2,20 @@
 // custom errors: 1 arithmetic, 2 account identity/layout, 3 payload, 4 authorization,
 // 6 no eligible offer/full book or list, 7 lifecycle/deadline, 8 usage constraint.
 pub const MARKET_LEN: usize = 72;
+pub const FEE_MARKET_LEN: usize = 280;
 pub const MODEL_LEN: usize = 144;
+pub const RESERVE_MODEL_LEN: usize = 208;
 pub const URI_MAX: usize = 256;
 pub const PROVIDER_LEN: usize = 108 + URI_MAX;
 pub const MODEL_METADATA_LEN: usize = 140 + URI_MAX;
 pub const LIST_METADATA_LEN: usize = 140 + URI_MAX;
 pub const USER_LEN: usize = 120;
 pub const BOOKING_LEN: usize = 368;
+pub const FEE_BOOKING_LEN: usize = 440;
+pub const LIST_FEE_LEN: usize = 8;
+pub const MIN_LIST_FEE_BPS: u16 = 10;
+pub const MAX_LIST_FEE_BPS: u16 = 300;
+pub const MIN_PROTOCOL_SHARE_BPS: u16 = 5000;
 pub const HEADER_LEN: usize = 48;
 pub const TERMS_LEN: usize = 120;
 pub const CAPACITY_LEN: usize = 32;
@@ -26,9 +33,14 @@ pub const BOOK_MAGIC: &[u8; 8] = b"BOOK0V20";
 pub const LIST_MAGIC: &[u8; 8] = b"LIST0V30";
 pub const LIST_METADATA_MAGIC: &[u8; 8] = b"LMETAV30";
 
-// market: magic0, creator8[32], mint40[32]; immutable.
+// market: magic0, admin8[32], mint40[32]; mint immutable, admin handoff requires both signatures.
+// configured market280: treasury72[32], treasury2_104[32], creation_mint136[32],
+// creation_token_program168[32], creation_net_price200:u64, creation_enabled208:u8,
+// reserved209[7], dex_program216[32], dex_config248[32]. configuration never changes booked fees.
 // model: magic0, market8[32], model_id40[32], terms72[32], capacity104[32], limit136:u32, bump140:u8.
 // model pda: [b"model", market, model_id]; first registered provider creates canonical books; limits may grow.
+// activated model208: route_to_reserve141:u8, backing_vault144[32], fixed_token_mint176[32].
+// backing authority is model pda; token mint pda [b"reserve_mint", model]. no repeat activation.
 // provider pda: [b"provider", market, provider]. magic0, market8[32], authority40[32],
 // document_sha25672[32], uri_len104:u16, reserved106:u8, bump107:u8, uri108[256].
 // model metadata pda: [b"model_metadata", model]. magic0, market8[32], model40[32],
@@ -49,11 +61,17 @@ pub const LIST_METADATA_MAGIC: &[u8; 8] = b"LMETAV30";
 // derived cache at80+limit*32: count32-byte nodes in dense eytzinger order, children2i+1/2i+2.
 // inorder equals sorted identities; each node stores four u64le values decoded from key chunks as big-endian.
 // program-maintained cache permits bounded full-key membership without allocation or hashing.
+// configured list appends8 bytes: fee_bps0:u16 (10..300), protocol_share2:u16 (5000..10000), reserved4[4].
+// creation payment is independent; membership edits retain fee terms. preconfiguration lists must opt in before booking.
 // booking: magic0, owner8[32], provider40[32], market72[32], reserve104:u64, rates112[3*u32],
 // max_input124:u32, max_output128:u32, claim_end132:i64, reserved140[8], status148:u8,
 // generation152:u64, charge160:u64, usage168[3*u32], min_speed180:u16, user192[32], model224[32],
 // rent_payer256[32], payout288[32], provider_list320[32], slot352:u32, reserved356:u8,
 // requested_privacy357:u8, cache_allowed358:u8, reserved359:u8, estimated_score360:u64.
+// fee booking440 appends creator368[32], protocol_destination400[32], fee_bps432:u16,
+// protocol_share434:u16, reserve_destination436:u8, reserved437[3]. destination is treasury owner
+// or exact reserve vault; both beneficiaries and fee terms pinned. reserve/score/charge include surcharge.
+// list fee ceil(provider_charge*bps/10000); protocol ceil(list_fee*share/10000), creator remainder.
 // status: 0 reserved, 3 released/expired, 4 finalized, 5 available for reuse. claim finalizes immediately.
 // receipt120: owner0[32], user32[32], booking64[32], generation96:u64, charge104:u64, claim_end112:i64.
 // receipts authenticated in top-level claim instruction data; no separate receipt accounts.
@@ -96,6 +114,25 @@ pub const LIST_METADATA_MAGIC: &[u8; 8] = b"LMETAV30";
 //   increase only, at most85 slots per instruction, maximum4096; payer covers rent, data retained.
 // 33 list metadata: [market, list, list_metadata(w), authority(s), payer(ws), system_program]; metadata.
 // 34 update list metadata: [market, list, list_metadata(w), authority(s)]; metadata.
+// configured markets require opcode28 payload limit:u32, fee_bps:u16, protocol_share:u16, max_creation_debit:u64;
+// enabled creation payment appends source(w), treasury_token(w), payment_mint, payment_token_program.
+// configured opcode6 requires440-byte booking; fee claims append creator_token(w), protocol_token(w).
+// old in-flight368-byte bookings settle unchanged. configured markets reject legacy list creation/new bookings.
+// 35 configuration: [market(w), admin(s), payer(ws), system]; treasury[32], treasury2[32], payment_mint[32],
+// payment_program[32], net_price:u64, enabled:u8. enabled config appends payment_mint, payment_program.
+// 36 list fees: [market, list(w), authority(s), payer(ws), system]; fee_bps:u16, protocol_share:u16.
+// 37 activate: [market, model(w), admin(s), payer(ws), system, new_mint(w), backing(w), allocation(w),
+// quote_mint, token_program, token2022, dex_program, ..15 dex curve accounts, dex_global]; supply:u64, decimals:u8,
+// tax_bps:u16, max_tax:u64, then40-byte dex opcode9 payload. initializes preallocated empty backing165,
+// allocation178 and curve base-vault178; issues fixed supply to treasury, revokes minting, launches atomically.
+// 38 reserve policy: [market, model(w), admin(s), mint(w), token2022]; route:u8, tax_bps:u16, max_tax:u64.
+// native token2022 tax changes use its delayed activation epochs; enabling requires remaining token supply.
+// 39 redeem: [market, model, mint(w), source(w), holder(s), backing(w), destination(w), quote, token, token2022];
+// burn_amount:u64, min_quote_out:u64. floor(backing*burn/current_supply); zero output rejected, final burn drains.
+// 40 collect: [market, model, mint(w), treasury2_token(w), token2022]; empty. permissionless native harvest first.
+// 41 empty reserve sweep: [market, model, mint, backing(w), treasury_token(w), quote, token]; empty; supply zero only.
+// 42 dex configuration: [market(w), admin(s), executable_dex, dex_config]; empty; matching admin and quote required.
+// 43 admin handoff: [market(w), current_admin(s), new_admin(s)]; empty; identity, vaults and bookings unchanged.
 // removed opcodes4,9,11,12,13,14,16,20,23,24,25,27 reject; never repurposed.
 
 pub const fn terms_book_len(limit: usize) -> usize {

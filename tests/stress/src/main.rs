@@ -1,6 +1,7 @@
 #[path = "../../support/scenarios.rs"]
 mod scenarios;
 fn main() {
+    scenarios::economics();
     scenarios::list_metadata();
     scenarios::scale();
     scenarios::growth();
@@ -9,6 +10,8 @@ fn main() {
     scenarios::migration(false);
     scenarios::migration(true);
 }
+#[test]
+fn fee_and_reserve_economics() { scenarios::economics(); }
 #[test]
 fn protocol_and_receipts() {
     scenarios::run(false);

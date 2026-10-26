@@ -173,9 +173,21 @@ impl Vm {
             Message::new(&ixs, Some(&self.payer.pubkey())),
             self.svm.latest_blockhash(),
         );
+        let packet_len = 1 + 64 * tx.signatures.len() + tx.message_data().len();
+        if op == 37 {
+            assert!(
+                packet_len <= 1232,
+                "activation packet {packet_len} exceeds 1232 bytes"
+            );
+        }
         match self.svm.send_transaction(tx) {
             Ok(meta) => {
                 assert!(succeeds, "opcode {op} unexpectedly succeeded");
+                if op == 37 {
+                    println!(
+                        "atomic model activation serialized legacy transaction: {packet_len} bytes"
+                    );
+                }
                 meta.compute_units_consumed
             }
             Err(error) => {
@@ -471,11 +483,15 @@ fn claim(v: &Vm, f: &Fixture, b: Address, usage: [u32; 3]) -> Vec<u8> {
     for (i, n) in usage.iter().enumerate() {
         wr32(&mut p, i * 4, *n);
     }
-    let cost = usage
+    let mut cost: u64 = usage
         .iter()
         .enumerate()
         .map(|(i, n)| (u64::from(*n) * u64::from(rd32(&bd, 112 + i * 4))).div_ceil(1_000_000))
         .sum();
+    if bd.len() == FEE_BOOKING_LEN {
+        let bps = u16::from_le_bytes(bd[432..434].try_into().unwrap());
+        cost += (cost * u64::from(bps)).div_ceil(10_000);
+    }
     p[12..20].copy_from_slice(&bd[152..160]);
     p[20..52].copy_from_slice(f.owner.pubkey().as_ref());
     p[52..84].copy_from_slice(f.user.as_ref());
@@ -484,6 +500,12 @@ fn claim(v: &Vm, f: &Fixture, b: Address, usage: [u32; 3]) -> Vec<u8> {
     wr64(&mut p, 124, cost);
     p[132..140].copy_from_slice(&bd[132..140]);
     p
+}
+
+#[path = "economics.rs"]
+mod economics;
+pub fn economics() {
+    economics::run();
 }
 fn reconcile(v: &Vm, f: &Fixture, open: &[Address], paid: u64) {
     let reserved: u64 = open.iter().map(|key| rd64(&v.data(*key), 104)).sum();
@@ -943,9 +965,16 @@ fn tree_fixture(d: &mut [u8]) {
 }
 
 fn scale_case(count: usize, list_count: usize, mode: u8, cached: bool) {
-    scale_with_token(count, list_count, mode, cached, false)
+    scale_with_token(count, list_count, mode, cached, false, false)
 }
-fn scale_with_token(count: usize, list_count: usize, mode: u8, cached: bool, legacy: bool) {
+fn scale_with_token(
+    count: usize,
+    list_count: usize,
+    mode: u8,
+    cached: bool,
+    legacy: bool,
+    fees: bool,
+) {
     let mut v = Vm::new(legacy, false);
     let mut f = setup(&mut v);
     let mut keys = vec![[0u8; 32]; list_count];
@@ -1036,8 +1065,35 @@ fn scale_with_token(count: usize, list_count: usize, mode: u8, cached: bool, leg
         true,
     );
     assert_eq!(v.data(f.list.pubkey()), members);
+    if fees {
+        let admin = v.payer.pubkey();
+        let mut cfg = vec![0; 137];
+        cfg[..32].copy_from_slice(admin.as_ref());
+        cfg[32..64].copy_from_slice(key().as_ref());
+        v.send(
+            35,
+            &cfg,
+            vec![w(f.market), s(admin), ws(admin), r(SYSTEM)],
+            &[],
+            true,
+        );
+        let p = [300u16.to_le_bytes(), 5000u16.to_le_bytes()].concat();
+        v.send(
+            36,
+            &p,
+            vec![
+                r(f.market),
+                w(f.list.pubkey()),
+                s(f.manager.pubkey()),
+                ws(admin),
+                r(SYSTEM),
+            ],
+            &[&f.manager],
+            true,
+        );
+    }
     let b = Keypair::new();
-    v.blank(&b, BOOKING_LEN);
+    v.blank(&b, if fees { FEE_BOOKING_LEN } else { BOOKING_LEN });
     let mut p = request(&f, Some(1));
     if cached {
         wr32(&mut p, 67, 500_000);
@@ -1085,7 +1141,7 @@ fn scale_with_token(count: usize, list_count: usize, mode: u8, cached: bool, leg
     );
     let budget = (20_000 + 500 * count as u64).min(1_400_000);
     assert!(cu <= budget, "reserve_cu={cu}, budget={budget}");
-    println!("scale offers={count} members={list_count} mode={mode} cached={cached} legacy_deposit={legacy}: reserve={cu} init={initialize} remove={remove} insert={insert}");
+    println!("scale offers={count} members={list_count} mode={mode} cached={cached} legacy_deposit={legacy} fees={fees}: reserve={cu} init={initialize} remove={remove} insert={insert}");
 }
 
 pub fn scale() {
@@ -1098,7 +1154,9 @@ pub fn scale() {
     scale_case(4096, 4096, 7, false);
     scale_case(4096, 4096, 8, true);
     scale_case(4095, 4095, 8, false);
-    scale_with_token(4096, 4096, 7, true, true);
+    scale_with_token(4096, 4096, 7, true, true, false);
+    scale_with_token(4096, 4096, 7, true, false, true);
+    scale_with_token(4096, 4096, 7, true, true, true);
     for count in [1, 16, 256] {
         scale_case(count, 4096, 1, true);
     }

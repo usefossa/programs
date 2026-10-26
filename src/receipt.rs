@@ -1,5 +1,5 @@
 use crate::{
-    abi::{BOOKING_LEN, BOOK_MAGIC},
+    abi::{BOOKING_LEN, BOOK_MAGIC, FEE_BOOKING_LEN, FEE_MARKET_LEN},
     helpers::{err, rd64, require},
     state::{all_zero, fresh, market, user, writable},
 };
@@ -19,7 +19,10 @@ pub fn prepare_booking(
 ) -> Result<u64, ProgramError> {
     require(p.len() == 115, 3)?;
     writable(&[b])?;
-    require(b.owner() == program && b.data_len() == BOOKING_LEN, 2)?;
+    require(
+        b.owner() == program && (b.data_len() == BOOKING_LEN || b.data_len() == FEE_BOOKING_LEN),
+        2,
+    )?;
     let data = b.try_borrow()?;
     let next = rd64(p, 107);
     if all_zero(&data) {
@@ -80,9 +83,17 @@ pub fn initialize(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> 
         return Err(err(3));
     };
     require(p.is_empty() && owner.is_signer() && payer.is_signer(), 4)?;
-    market(m, program)?;
+    let md = market(m, program)?;
     user(u, program, owner.address(), m.address())?;
-    fresh(b, program, BOOKING_LEN)?;
+    fresh(
+        b,
+        program,
+        if md.len() == FEE_MARKET_LEN {
+            FEE_BOOKING_LEN
+        } else {
+            BOOKING_LEN
+        },
+    )?;
     let mut d = b.try_borrow_mut()?;
     d[..8].copy_from_slice(BOOK_MAGIC);
     d[8..40].copy_from_slice(owner.address().as_ref());

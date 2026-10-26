@@ -1,6 +1,6 @@
 use crate::{
-    abi::{LIST_HEADER, LIST_MAGIC, MAX_ENTRIES},
-    helpers::{add, err, rd32, require, wr32},
+    abi::{FEE_MARKET_LEN, LIST_FEE_LEN, LIST_HEADER, LIST_MAGIC, MAX_ENTRIES},
+    helpers::{add, err, rd16, rd32, rd64, require, wr32},
     state::{fresh, market, writable},
 };
 use pinocchio::{account::Ref, error::ProgramError, AccountView, Address, ProgramResult};
@@ -26,6 +26,7 @@ pub(crate) fn rebuild(d: &mut [u8]) {
     let limit = rd32(d, 72) as usize;
     let count = rd32(d, 76) as usize;
     let (head, tail) = d.split_at_mut(80 + limit * 32);
+    let tail = &mut tail[..limit * 32];
     tail.fill(0);
     // callers validate account alignment and bounded layout; cache contains integers only.
     let keys =
@@ -172,7 +173,8 @@ pub(crate) fn state<'a>(
         d.as_ptr() as usize & 7 == 0
             && &d[..8] == LIST_MAGIC
             && (1..=MAX_ENTRIES).contains(&limit)
-            && d.len() == LIST_HEADER + limit * 64
+            && (d.len() == LIST_HEADER + limit * 64
+                || d.len() == LIST_HEADER + limit * 64 + LIST_FEE_LEN)
             && rd32(&d, 76) as usize <= limit,
         2,
     )?;
@@ -184,19 +186,37 @@ pub(crate) fn initialize(
     accounts: &mut [AccountView],
     p: &[u8],
 ) -> ProgramResult {
-    let [m, list, authority] = accounts else {
+    require(accounts.len() >= 3, 3)?;
+    let (core, payment) = accounts.split_at_mut(3);
+    let [m, list, authority] = core else {
         return Err(err(3));
     };
-    require(p.len() == 4 && authority.is_signer(), 3)?;
-    market(m, program)?;
+    require(authority.is_signer(), 4)?;
+    let md = market(m, program)?;
+    let fees = md.len() == FEE_MARKET_LEN;
+    require(p.len() == if fees { 16 } else { 4 }, 3)?;
+    if fees {
+        super::fees::validate_terms(rd16(p, 4), rd16(p, 6))?;
+        super::fees::creation_payment(&md, authority, payment, rd64(p, 8))?;
+    } else {
+        require(payment.is_empty(), 3)?;
+    }
     let limit = rd32(p, 0) as usize;
     require((1..=MAX_ENTRIES).contains(&limit), 3)?;
-    fresh(list, program, LIST_HEADER + limit * 64)?;
+    fresh(
+        list,
+        program,
+        LIST_HEADER + limit * 64 + if fees { LIST_FEE_LEN } else { 0 },
+    )?;
     let mut d = list.try_borrow_mut()?;
     d[..8].copy_from_slice(LIST_MAGIC);
     d[8..40].copy_from_slice(m.address().as_ref());
     d[40..72].copy_from_slice(authority.address().as_ref());
     wr32(&mut d, 72, limit as u32);
+    if fees {
+        let at = LIST_HEADER + limit * 64;
+        d[at..at + 4].copy_from_slice(&p[4..8]);
+    }
     Ok(())
 }
 

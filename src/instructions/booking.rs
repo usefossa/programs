@@ -1,10 +1,16 @@
 use crate::receipt;
 use crate::{
-    abi::{BOOKING_LEN, BOOK_MAGIC, CAPACITY_LEN, HEADER_LEN, TERMS_LEN},
-    helpers::{add, dec, err, fee, inc, rd16, rd32, rd64, require, ri64, sub, wi64, wr32, wr64},
+    abi::{
+        BOOKING_LEN, BOOK_MAGIC, CAPACITY_LEN, FEE_BOOKING_LEN, FEE_MARKET_LEN, HEADER_LEN,
+        LIST_FEE_LEN, RESERVE_MODEL_LEN, TERMS_LEN,
+    },
+    helpers::{
+        add, addr, bps_ceil, dec, err, fee, fee_budget, inc, rd16, rd32, rd64, require, ri64, sub,
+        wi64, wr16, wr32, wr64,
+    },
     matching::{select, Request},
     state::{book, booked_user, booking, fresh, market, model, slot_offset, user, writable},
-    token::{token_owned_by, user_transfer, user_vault},
+    token::{token_owned_by, user_payments, user_transfer, user_vault, vault_owned_by},
     CLAIM_SECONDS,
 };
 use pinocchio::{
@@ -19,9 +25,13 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
     };
     require(owner.is_signer(), 4)?;
     writable(&[c, u])?;
+    let md = market(m, program)?;
+    let fees = md.len() == FEE_MARKET_LEN;
+    let booking_len = if fees { FEE_BOOKING_LEN } else { BOOKING_LEN };
+    require(b.data_len() == booking_len, 2)?;
     let generation = if p.len() == 107 {
         require(rent_payer.is_signer(), 4)?;
-        fresh(b, program, BOOKING_LEN)?;
+        fresh(b, program, booking_len)?;
         0
     } else {
         receipt::prepare_booking(
@@ -35,7 +45,6 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
         )?
     };
     let p = &p[..107];
-    market(m, program)?;
     let modl = model(mo, program, m.address())?;
     let ud = user(u, program, owner.address(), m.address())?;
     {
@@ -48,14 +57,28 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
             7,
         )?;
     }
-    let r = Request::parse(p, rd64(&ud, 72))?;
+    let mut r = Request::parse(p, rd64(&ud, 72))?;
     require(modl[40..72] == p[..32], 2)?;
     let td = book(t, program, mo, &modl, true)?;
     let cd = book(c, program, mo, &modl, false)?;
     let ld = crate::instructions::list::state(list, program)?;
     require(&ld[8..40] == m.address().as_ref(), 2)?;
+    let (fee_bps, protocol_bps) = if fees {
+        let at = crate::abi::provider_list_len(rd32(&ld, 72) as usize);
+        require(ld.len() == at + LIST_FEE_LEN, 7)?;
+        let terms = (rd16(&ld, at), rd16(&ld, at + 2));
+        super::fees::validate_terms(terms.0, terms.1)?;
+        r.spend = fee_budget(r.spend, terms.0);
+        terms
+    } else {
+        (0, 0)
+    };
     let providers = &*ld;
-    let chosen = select(&td, &cd, providers, &r)?;
+    let mut chosen = select(&td, &cd, providers, &r)?;
+    if fees {
+        chosen.reserve = add(chosen.reserve, bps_ceil(chosen.reserve, fee_bps))?;
+        chosen.score = add(chosen.score, bps_ceil(chosen.score, fee_bps))?;
+    }
     let ti = HEADER_LEN + chosen.slot as usize * TERMS_LEN;
     let ci = HEADER_LEN + chosen.slot as usize * CAPACITY_LEN;
     let active = inc(rd32(&cd, ci + 16))?;
@@ -90,6 +113,18 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
     bd[357] = p[54];
     bd[358] = u8::from(chosen.cache);
     wr64(&mut bd, 360, chosen.score);
+    if fees {
+        bd[368..400].copy_from_slice(&ld[40..72]);
+        let reserve = modl.len() == RESERVE_MODEL_LEN && modl[141] == 1;
+        bd[400..432].copy_from_slice(if reserve {
+            &modl[144..176]
+        } else {
+            &md[72..104]
+        });
+        wr16(&mut bd, 432, fee_bps);
+        wr16(&mut bd, 434, protocol_bps);
+        bd[436] = u8::from(reserve);
+    }
     drop(bd);
     drop(ud);
     drop(cd);
@@ -104,7 +139,9 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
 
 #[inline(always)]
 pub(crate) fn claim(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, mo, c, u, b, provider, vault, payout, mint, authority, token] = accounts else {
+    require(accounts.len() == 11 || accounts.len() == 13, 3)?;
+    let (core, destinations) = accounts.split_at_mut(11);
+    let [m, mo, c, u, b, provider, vault, payout, mint, authority, token] = core else {
         return Err(err(3));
     };
     require(p.len() == 12 || p.len() == 140, 3)?;
@@ -115,6 +152,25 @@ pub(crate) fn claim(program: &Address, accounts: &mut [AccountView], p: &[u8]) -
     let modl = model(mo, program, m.address())?;
     let cd = book(c, program, mo, &modl, false)?;
     let bd = booking(b, program, m.address(), mo.address())?;
+    let fees = bd.len() == FEE_BOOKING_LEN;
+    require(destinations.len() == if fees { 2 } else { 0 }, 3)?;
+    require(payout.address() != vault.address(), 2)?;
+    if fees {
+        super::fees::validate_terms(rd16(&bd, 432), rd16(&bd, 434))?;
+        require(bd[436] <= 1 && bd[437..440] == [0; 3], 2)?;
+        writable(&[&destinations[0], &destinations[1]])?;
+        require(
+            destinations.iter().all(|d| d.address() != vault.address()),
+            2,
+        )?;
+        token_owned_by(&destinations[0], mint.address(), &addr(&bd, 368))?;
+        if bd[436] == 1 {
+            require(&bd[400..432] == destinations[1].address().as_ref(), 2)?;
+            vault_owned_by(&destinations[1], mint.address(), mo.address())?;
+        } else {
+            token_owned_by(&destinations[1], mint.address(), &addr(&bd, 400))?;
+        }
+    }
     let generation = rd64(&bd, 152);
     require(
         if generation == 0 {
@@ -147,8 +203,20 @@ pub(crate) fn claim(program: &Address, accounts: &mut [AccountView], p: &[u8]) -
             && (cached == 0 || bd[358] == 1),
         8,
     )?;
-    let charge =
+    let provider_charge =
         fee(uncached, rd32(&bd, 112)) + fee(cached, rd32(&bd, 116)) + fee(output, rd32(&bd, 120));
+    let list_fee = if fees {
+        bps_ceil(provider_charge, rd16(&bd, 432))
+    } else {
+        0
+    };
+    let protocol_fee = if fees {
+        bps_ceil(list_fee, rd16(&bd, 434))
+    } else {
+        0
+    };
+    let creator_fee = list_fee - protocol_fee;
+    let charge = add(provider_charge, list_fee)?;
     let reserve = rd64(&bd, 104);
     require(charge <= reserve, 8)?;
     let free = add(rd64(&ud, 72), reserve - charge)?;
@@ -157,13 +225,25 @@ pub(crate) fn claim(program: &Address, accounts: &mut [AccountView], p: &[u8]) -
     drop(ud);
     drop(bd);
     drop(cd);
-    if charge > 0 {
+    if fees {
+        user_payments(
+            [vault, mint, authority],
+            [
+                (payout, provider_charge),
+                (&destinations[0], creator_fee),
+                (&destinations[1], protocol_fee),
+            ],
+            u.address(),
+            bump,
+            program,
+        )?;
+    } else if provider_charge > 0 {
         user_transfer(
             [vault, mint, payout, authority],
             u.address(),
             bump,
             program,
-            charge,
+            provider_charge,
         )?;
     }
     let mut d = b.try_borrow_mut()?;
@@ -248,7 +328,7 @@ pub(crate) fn close(program: &Address, accounts: &mut [AccountView], p: &[u8]) -
     writable(&[a, recipient])?;
     require(a.owner() == program, 2)?;
     let d = a.try_borrow()?;
-    if d.len() == BOOKING_LEN && &d[..8] == BOOK_MAGIC {
+    if (d.len() == BOOKING_LEN || d.len() == FEE_BOOKING_LEN) && &d[..8] == BOOK_MAGIC {
         let terminal = d[148] == 3 || d[148] == 4;
         let terminal = {
             if d[148] == receipt::AVAILABLE {
