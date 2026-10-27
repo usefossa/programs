@@ -1,4 +1,4 @@
-use pinocchio::error::ProgramError;
+use anchor_lang::prelude::ProgramError;
 
 pub type Result<T> = core::result::Result<T, ProgramError>;
 pub const BPS: u64 = 10_000;

@@ -2,9 +2,12 @@ use crate::{
     abi::*,
     helpers::{addr, err, rd16, rd64, require},
     state::{all_zero, initialize_pda, market, model, writable},
-    token::{self, payment_token, raw, TOKEN_2022},
+    token::{self, payment_token, TOKEN_2022},
 };
-use pinocchio::{cpi::Signer, instruction::seeds, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::prelude::{AccountView, Address, ProgramResult};
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
+use anchor_spl::{token_2022_extensions as fees, token_interface as spl};
 
 fn mint_state(mint: &AccountView, mo: &AccountView) -> ProgramResult {
     require(mint.owner() == &TOKEN_2022 && mint.data_len() == 278, 2)?;
@@ -30,7 +33,7 @@ fn reserve_accounts(
     mint: &AccountView,
     backing: &AccountView,
     quote: &AccountView,
-) -> Result<([u8; 32], u8), pinocchio::error::ProgramError> {
+) -> Result<([u8; 32], u8)> {
     let md = market(m, program)?;
     let d = model(mo, program, m.address())?;
     require(
@@ -45,21 +48,60 @@ fn reserve_accounts(
     Ok((d[40..72].try_into().unwrap(), d[140]))
 }
 
-pub(crate) fn activate(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    require(accounts.len() == 28, 3)?;
-    let (core, curve) = accounts.split_at_mut(12);
-    let [m, mo, admin, payer, system, mint, backing, allocation, quote, token, t22, dex] = core
-    else {
-        return Err(err(3));
-    };
+pub(crate) fn activate(
+    ctx: &mut anchor_lang::Context<crate::contexts::ActivateReserve>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut mo = *ctx.accounts.mo.account();
+    let mo = &mut mo;
+    let admin = ctx.accounts.admin.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    let mut mint = *ctx.accounts.mint.account();
+    let mint = &mut mint;
+    let mut backing = *ctx.accounts.backing.account();
+    let backing = &mut backing;
+    let mut allocation = *ctx.accounts.allocation.account();
+    let allocation = &mut allocation;
+    let quote = ctx.accounts.quote.account();
+    let token = ctx.accounts.token.account();
+    let t22 = ctx.accounts.t22.account();
+    let dex = ctx.accounts.dex.account();
+    let mut curve_payer = *ctx.accounts.curve_payer.account();
+    let curve_payer = &mut curve_payer;
+    let curve_config = ctx.accounts.curve_config.account();
+    let mut curve_pool = *ctx.accounts.curve_pool.account();
+    let curve_pool = &mut curve_pool;
+    let curve_authority = ctx.accounts.curve_authority.account();
+    let curve_mint = ctx.accounts.curve_mint.account();
+    let curve_quote = ctx.accounts.curve_quote.account();
+    let mut curve_source = *ctx.accounts.curve_source.account();
+    let curve_source = &mut curve_source;
+    let curve_quote_source = ctx.accounts.curve_quote_source.account();
+    let mut curve_base_vault = *ctx.accounts.curve_base_vault.account();
+    let curve_base_vault = &mut curve_base_vault;
+    let mut curve_quote_vault = *ctx.accounts.curve_quote_vault.account();
+    let curve_quote_vault = &mut curve_quote_vault;
+    let mut curve_lp_mint = *ctx.accounts.curve_lp_mint.account();
+    let curve_lp_mint = &mut curve_lp_mint;
+    let mut curve_lp = *ctx.accounts.curve_lp.account();
+    let curve_lp = &mut curve_lp;
+    let curve_token = ctx.accounts.curve_token.account();
+    let curve_quote_token = ctx.accounts.curve_quote_token.account();
+    let curve_lp_token = ctx.accounts.curve_lp_token.account();
+    let dex_global = ctx.accounts.dex_global.account();
     require(
         p.len() == 59
             && rd64(p, 0) > 0
             && rd16(p, 9) <= 10_000
             && rd64(p, 19) > 0
             && rd64(p, 19) <= rd64(p, 0)
-            && system.address() == &pinocchio_system::ID
-            && token.address() == &pinocchio_token::ID
+            && system.address() == &anchor_lang::system_program::ID
+            && token.address() == &anchor_spl::token::ID
             && t22.address() == &TOKEN_2022,
         3,
     )?;
@@ -72,24 +114,24 @@ pub(crate) fn activate(program: &Address, accounts: &mut [AccountView], p: &[u8]
     let treasury = addr(&md, 72);
     require(
         &md[216..248] == dex.address().as_ref()
-            && &md[248..280] == curve[1].address().as_ref()
-            && curve[0].address() == &treasury
-            && curve[4].address() == mint.address()
-            && curve[5].address() == quote.address()
-            && curve[6].address() == allocation.address()
-            && curve[7].address() != backing.address()
-            && curve[9].address() != backing.address(),
+            && &md[248..280] == curve_config.address().as_ref()
+            && curve_payer.address() == &treasury
+            && curve_mint.address() == mint.address()
+            && curve_quote.address() == quote.address()
+            && curve_source.address() == allocation.address()
+            && curve_quote_source.address() != backing.address()
+            && curve_quote_vault.address() != backing.address(),
         2,
     )?;
     let d = model(mo, program, m.address())?;
     require(d.len() == MODEL_LEN, 7)?;
     let id: [u8; 32] = d[40..72].try_into().unwrap();
     let bump = [d[140]];
-    let model_seeds = seeds!(b"model", m.address().as_ref(), &id, &bump);
+    let model_seeds: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
     drop((md, d));
     writable(&[mo, mint, backing, allocation])?;
     for (account, owner, len) in [
-        (backing as &AccountView, &pinocchio_token::ID, 165),
+        (backing as &AccountView, &anchor_spl::token::ID, 165),
         (allocation as &AccountView, &TOKEN_2022, 178),
     ] {
         require(
@@ -104,92 +146,130 @@ pub(crate) fn activate(program: &Address, accounts: &mut [AccountView], p: &[u8]
             .ok_or(err(2))?;
     require(mint.address() == &expected, 2)?;
     let mint_bump = [mint_bump];
-    let mint_seeds = seeds!(b"reserve_mint", mo.address().as_ref(), &mint_bump);
-    initialize_pda(mint, payer, &TOKEN_2022, 278, Signer::from(&mint_seeds))?;
-    let mut fee = [0u8; 78];
-    fee[..3].copy_from_slice(&[26, 0, 1]);
-    fee[3..35].copy_from_slice(mo.address().as_ref());
-    fee[35] = 1;
-    fee[36..68].copy_from_slice(mo.address().as_ref());
-    fee[68..].copy_from_slice(&p[9..19]);
-    raw(&TOKEN_2022, [mint], [(true, false)], &fee, &[])?;
-    let mut init = [0u8; 35];
-    init[0] = 20;
-    init[1] = p[8];
-    init[2..34].copy_from_slice(mo.address().as_ref());
-    raw(&TOKEN_2022, [mint], [(true, false)], &init, &[])?;
-    let mut init_account = [0u8; 33];
-    init_account[0] = 18;
-    init_account[1..].copy_from_slice(mo.address().as_ref());
-    raw(
-        &pinocchio_token::ID,
-        [backing, quote],
-        [(true, false), (false, false)],
-        &init_account,
-        &[],
+    let mint_seeds: &[&[u8]] = &[b"reserve_mint", mo.address().as_ref(), &mint_bump];
+    initialize_pda(mint, payer, &TOKEN_2022, 278, mint_seeds)?;
+    fees::transfer_fee_initialize(
+        CpiContext::new(
+            &TOKEN_2022,
+            fees::TransferFeeInitialize {
+                mint: mint.try_to_cpi_handle_mut()?,
+            },
+        ),
+        Some(mo.address()),
+        Some(mo.address()),
+        rd16(p, 9),
+        rd64(p, 11),
     )?;
-    init_account[1..].copy_from_slice(treasury.as_ref());
-    raw(
+    spl::initialize_mint2(
+        CpiContext::new(
+            &TOKEN_2022,
+            spl::InitializeMint2 {
+                mint: mint.try_to_cpi_handle_mut()?,
+            },
+        ),
+        p[8],
+        mo.address(),
+        None,
+    )?;
+    spl::initialize_account3(CpiContext::new(
+        &anchor_spl::token::ID,
+        spl::InitializeAccount3 {
+            account: backing.try_to_cpi_handle_mut()?,
+            mint: quote.to_cpi_handle(),
+            authority: mo.to_cpi_handle(),
+        },
+    ))?;
+    spl::initialize_account3(CpiContext::new(
         &TOKEN_2022,
-        [allocation, mint],
-        [(true, false), (false, false)],
-        &init_account,
-        &[],
-    )?;
+        spl::InitializeAccount3 {
+            account: allocation.try_to_cpi_handle_mut()?,
+            mint: mint.to_cpi_handle(),
+            authority: curve_payer.to_cpi_handle(),
+        },
+    ))?;
     require(
-        curve[8].owner() == &TOKEN_2022
-            && curve[8].data_len() == 178
-            && all_zero(&curve[8].try_borrow()?),
+        curve_base_vault.owner() == &TOKEN_2022
+            && curve_base_vault.data_len() == 178
+            && all_zero(&curve_base_vault.try_borrow()?),
         2,
     )?;
-    init_account[1..].copy_from_slice(curve[3].address().as_ref());
-    raw(
+    let mut base_vault = *curve_base_vault;
+    spl::initialize_account3(CpiContext::new(
         &TOKEN_2022,
-        [&curve[8], mint],
-        [(true, false), (false, false)],
-        &init_account,
-        &[],
+        spl::InitializeAccount3 {
+            account: base_vault.try_to_cpi_handle_mut()?,
+            mint: mint.to_cpi_handle(),
+            authority: curve_authority.to_cpi_handle(),
+        },
+    ))?;
+    spl::mint_to_checked(
+        CpiContext::new_with_signer(
+            &TOKEN_2022,
+            spl::MintToChecked {
+                mint: mint.try_to_cpi_handle_mut()?,
+                to: allocation.try_to_cpi_handle_mut()?,
+                authority: mo.to_cpi_handle(),
+            },
+            &[model_seeds],
+        ),
+        rd64(p, 0),
+        p[8],
     )?;
-    let mut issue = [0u8; 10];
-    issue[0] = 14;
-    issue[1..9].copy_from_slice(&p[..8]);
-    issue[9] = p[8];
-    raw(
-        &TOKEN_2022,
-        [mint, allocation, mo],
-        [(true, false), (true, false), (false, true)],
-        &issue,
-        &[Signer::from(&model_seeds)],
-    )?;
-    raw(
-        &TOKEN_2022,
-        [mint, mo],
-        [(true, false), (false, true)],
-        &[6, 0, 0],
-        &[Signer::from(&model_seeds)],
-    )?;
+    crate::cross_program::revoke_mint(mint, mo, &TOKEN_2022, &[model_seeds])?;
     let mut launch = [0u8; 41];
     launch[0] = 9;
     launch[1..].copy_from_slice(&p[19..]);
-    let views: [&AccountView; 17] = core::array::from_fn(|i| {
-        if i == 15 {
-            &*admin
-        } else if i == 16 {
-            &curve[15]
-        } else {
-            &curve[i]
-        }
-    });
-    let flags = core::array::from_fn(|i| {
-        if i == 15 {
-            (false, true)
-        } else if i == 16 {
-            (false, false)
-        } else {
-            (curve[i].is_writable(), curve[i].is_signer())
-        }
-    });
-    raw(dex.address(), views, flags, &launch, &[])?;
+    let mut forwarded = [
+        *curve_payer,
+        *curve_config,
+        *curve_pool,
+        *curve_authority,
+        *curve_mint,
+        *curve_quote,
+        *curve_source,
+        *curve_quote_source,
+        *curve_base_vault,
+        *curve_quote_vault,
+        *curve_lp_mint,
+        *curve_lp,
+        *curve_token,
+        *curve_quote_token,
+        *curve_lp_token,
+        *admin,
+        *dex_global,
+    ];
+    let accounts = forwarded
+        .iter()
+        .enumerate()
+        .map(|(i, account)| AccountMeta {
+            pubkey: *account.address(),
+            is_writable: i < 15 && account.is_writable(),
+            is_signer: i == 15 || (i < 15 && account.is_signer()),
+        })
+        .collect();
+    let handles = forwarded
+        .iter_mut()
+        .enumerate()
+        .map(|(i, account)| {
+            if i < 15 && account.is_writable() {
+                CpiHandle::writable(account)
+            } else {
+                CpiHandle::readonly(account)
+            }
+        })
+        .collect();
+    CpiContext::new(
+        dex.address(),
+        ModelCurveLaunch {
+            _phantom: core::marker::PhantomData,
+        },
+    )
+    .with_remaining_accounts(handles)
+    .invoke_ix(Instruction {
+        program_id: *dex.address(),
+        accounts,
+        data: launch.to_vec(),
+    })?;
     super::fees::grow(mo, payer, RESERVE_MODEL_LEN)?;
     let mut d = mo.try_borrow_mut()?;
     d[141] = 1;
@@ -200,13 +280,18 @@ pub(crate) fn activate(program: &Address, accounts: &mut [AccountView], p: &[u8]
 }
 
 pub(crate) fn configure(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::ConfigureReserve>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, admin, mint, t22] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut mo = *ctx.accounts.mo.account();
+    let mo = &mut mo;
+    let admin = ctx.accounts.admin.account();
+    let mut mint = *ctx.accounts.mint.account();
+    let mint = &mut mint;
+    let t22 = ctx.accounts.t22.account();
     require(
         p.len() == 11 && p[0] <= 1 && rd16(p, 1) <= 10_000 && t22.address() == &TOKEN_2022,
         3,
@@ -223,30 +308,48 @@ pub(crate) fn configure(
     require(p[0] == 0 || rd64(&mint.try_borrow()?, 36) > 0, 7)?;
     let id: [u8; 32] = d[40..72].try_into().unwrap();
     let bump = [d[140]];
-    let signer = seeds!(b"model", m.address().as_ref(), &id, &bump);
+    let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
     drop(d);
-    let mut data = [0u8; 12];
-    data[..2].copy_from_slice(&[26, 5]);
-    data[2..].copy_from_slice(&p[1..]);
-    raw(
-        &TOKEN_2022,
-        [mint, mo],
-        [(true, false), (false, true)],
-        &data,
-        &[Signer::from(&signer)],
+    fees::transfer_fee_set(
+        CpiContext::new_with_signer(
+            &TOKEN_2022,
+            fees::TransferFeeSetTransferFee {
+                mint: mint.try_to_cpi_handle_mut()?,
+                authority: mo.to_cpi_handle(),
+            },
+            &[signer],
+        ),
+        rd16(p, 1),
+        rd64(p, 3),
     )?;
     mo.try_borrow_mut()?[141] = p[0];
     Ok(())
 }
 
-pub(crate) fn redeem(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, mo, mint, source, holder, backing, destination, quote, token, t22] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn redeem(
+    ctx: &mut anchor_lang::Context<crate::contexts::RedeemReserve>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut mint = *ctx.accounts.mint.account();
+    let mint = &mut mint;
+    let mut source = *ctx.accounts.source.account();
+    let source = &mut source;
+    let holder = ctx.accounts.holder.account();
+    let mut backing = *ctx.accounts.backing.account();
+    let backing = &mut backing;
+    let mut destination = *ctx.accounts.destination.account();
+    let destination = &mut destination;
+    let quote = ctx.accounts.quote.account();
+    let token = ctx.accounts.token.account();
+    let t22 = ctx.accounts.t22.account();
     require(
         p.len() == 16
             && rd64(p, 0) > 0
-            && token.address() == &pinocchio_token::ID
+            && token.address() == &anchor_spl::token::ID
             && t22.address() == &TOKEN_2022,
         3,
     )?;
@@ -262,30 +365,46 @@ pub(crate) fn redeem(program: &Address, accounts: &mut [AccountView], p: &[u8]) 
     let available = rd64(&backing.try_borrow()?, 64);
     let out = (u128::from(available) * u128::from(amount) / u128::from(supply)) as u64;
     require(out > 0 && out >= rd64(p, 8), 8)?;
-    let mut burn = [0u8; 10];
-    burn[0] = 15;
-    burn[1..9].copy_from_slice(&p[..8]);
-    burn[9] = mint.try_borrow()?[44];
-    raw(
-        &TOKEN_2022,
-        [source, mint, holder],
-        [(true, false), (true, false), (false, true)],
-        &burn,
-        &[],
+    let decimals = mint.try_borrow()?[44];
+    spl::burn_checked(
+        CpiContext::new(
+            &TOKEN_2022,
+            spl::BurnChecked {
+                from: source.try_to_cpi_handle_mut()?,
+                mint: mint.try_to_cpi_handle_mut()?,
+                authority: holder.to_cpi_handle(),
+            },
+        ),
+        amount,
+        decimals,
     )?;
     let bump = [bump];
-    let signer = seeds!(b"model", m.address().as_ref(), &id, &bump);
-    pinocchio_token::instructions::transfer_checked::TransferChecked::<
-        &AccountView,
-        pinocchio_token::TokenProgram,
-    >::new(backing, quote, destination, mo, out, 6)
-    .invoke_signed(&[Signer::from(&signer)])
+    let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
+    crate::cross_program::transfer_checked(
+        backing,
+        quote,
+        destination,
+        mo,
+        &anchor_spl::token::ID,
+        out,
+        6,
+        &[signer],
+    )
 }
 
-pub(crate) fn collect(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, mo, mint, destination, t22] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn collect(
+    ctx: &mut anchor_lang::Context<crate::contexts::CollectReserveTax>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut mint = *ctx.accounts.mint.account();
+    let mint = &mut mint;
+    let mut destination = *ctx.accounts.destination.account();
+    let destination = &mut destination;
+    let t22 = ctx.accounts.t22.account();
     require(p.is_empty() && t22.address() == &TOKEN_2022, 3)?;
     writable(&[mint, destination])?;
     let md = market(m, program)?;
@@ -299,28 +418,37 @@ pub(crate) fn collect(program: &Address, accounts: &mut [AccountView], p: &[u8])
     payment_token(destination, mint.address(), &addr(&md, 104), &TOKEN_2022)?;
     let id: [u8; 32] = d[40..72].try_into().unwrap();
     let bump = [d[140]];
-    let signer = seeds!(b"model", m.address().as_ref(), &id, &bump);
+    let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
     drop(d);
-    raw(
+    fees::withdraw_withheld_tokens_from_mint(CpiContext::new_with_signer(
         &TOKEN_2022,
-        [mint, destination, mo],
-        [(true, false), (true, false), (false, true)],
-        &[26, 2],
-        &[Signer::from(&signer)],
-    )
+        fees::WithdrawWithheldTokensFromMint {
+            mint: mint.try_to_cpi_handle_mut()?,
+            destination: destination.try_to_cpi_handle_mut()?,
+            authority: mo.to_cpi_handle(),
+        },
+        &[signer],
+    ))
 }
 
 pub(crate) fn sweep_empty(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::SweepReserve>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, mint, backing, destination, quote, token] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mint = ctx.accounts.mint.account();
+    let mut backing = *ctx.accounts.backing.account();
+    let backing = &mut backing;
+    let mut destination = *ctx.accounts.destination.account();
+    let destination = &mut destination;
+    let quote = ctx.accounts.quote.account();
+    let token = ctx.accounts.token.account();
     require(
         p.is_empty()
-            && token.address() == &pinocchio_token::ID
+            && token.address() == &anchor_spl::token::ID
             && backing.address() != destination.address(),
         3,
     )?;
@@ -335,10 +463,20 @@ pub(crate) fn sweep_empty(
         return Ok(());
     }
     let bump = [bump];
-    let signer = seeds!(b"model", m.address().as_ref(), &id, &bump);
-    pinocchio_token::instructions::transfer_checked::TransferChecked::<
-        &AccountView,
-        pinocchio_token::TokenProgram,
-    >::new(backing, quote, destination, mo, amount, 6)
-    .invoke_signed(&[Signer::from(&signer)])
+    let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
+    crate::cross_program::transfer_checked(
+        backing,
+        quote,
+        destination,
+        mo,
+        &anchor_spl::token::ID,
+        amount,
+        6,
+        &[signer],
+    )
+}
+
+#[derive(ToCpiAccounts)]
+struct ModelCurveLaunch<'a> {
+    _phantom: core::marker::PhantomData<&'a ()>,
 }

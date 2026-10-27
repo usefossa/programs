@@ -2,14 +2,7 @@ use crate::{
     abi::*,
     helpers::{addr, rd16, rd32, require},
 };
-use pinocchio::{
-    account::Ref,
-    cpi::Signer,
-    error::ProgramError,
-    sysvars::{rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult,
-};
-use pinocchio_system::instructions::{Allocate, Assign, Transfer};
+use anchor_lang::prelude::{AccountView, Address, ProgramError, ProgramResult};
 
 pub(crate) fn writable(accounts: &[&AccountView]) -> ProgramResult {
     require(accounts.iter().all(|a| a.is_writable()), 2)
@@ -19,7 +12,7 @@ pub(crate) fn state<'a>(
     program: &Address,
     len: usize,
     magic: &[u8; 8],
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(a.owner() == program && a.data_len() == len, 2)?;
     let d = a.try_borrow()?;
     require(&d[..8] == magic, 2)?;
@@ -40,7 +33,7 @@ pub(crate) fn all_zero(data: &[u8]) -> bool {
 pub(crate) fn market<'a>(
     a: &'a AccountView,
     program: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(
         a.data_len() == MARKET_LEN || a.data_len() == FEE_MARKET_LEN,
         2,
@@ -51,7 +44,7 @@ pub(crate) fn model<'a>(
     a: &'a AccountView,
     program: &Address,
     m: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(
         a.data_len() == MODEL_LEN || a.data_len() == RESERVE_MODEL_LEN,
         2,
@@ -73,7 +66,7 @@ pub(crate) fn profile<'a>(
     a: &'a AccountView,
     program: &Address,
     m: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     let d = state(a, program, PROVIDER_LEN, PROVIDER_MAGIC)?;
     require(
         &d[8..40] == m.as_ref()
@@ -121,30 +114,15 @@ pub(crate) fn initialize_pda(
     payer: &AccountView,
     program: &Address,
     len: usize,
-    signer: Signer<'_, '_>,
+    signer: &[&[u8]],
 ) -> ProgramResult {
     writable(&[a, payer])?;
     require(payer.is_signer(), 4)?;
-    require(a.owner() == &pinocchio_system::ID && a.data_len() == 0, 2)?;
-    let rent = Rent::get()?.try_minimum_balance(len)?;
-    if a.lamports() < rent {
-        Transfer {
-            from: payer,
-            to: a,
-            lamports: rent - a.lamports(),
-        }
-        .invoke()?;
-    }
-    Allocate {
-        account: a,
-        space: len as u64,
-    }
-    .invoke_signed(core::slice::from_ref(&signer))?;
-    Assign {
-        account: a,
-        owner: program,
-    }
-    .invoke_signed(&[signer])
+    require(
+        a.owner() == &anchor_lang::system_program::ID && a.data_len() == 0,
+        2,
+    )?;
+    anchor_lang::create_account_signed(payer, a, len, program, signer)
 }
 pub(crate) fn book<'a>(
     a: &'a AccountView,
@@ -152,7 +130,7 @@ pub(crate) fn book<'a>(
     model: &AccountView,
     md: &[u8],
     terms: bool,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     let limit = rd32(md, 136) as usize;
     require((1..=MAX_ENTRIES).contains(&limit), 2)?;
     let (offset, len, magic) = if terms {
@@ -179,7 +157,7 @@ pub(crate) fn user<'a>(
     program: &Address,
     owner: &Address,
     m: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     let d = state(a, program, USER_LEN, USER_MAGIC)?;
     require(&d[8..40] == owner.as_ref() && &d[40..72] == m.as_ref(), 2)?;
     Ok(d)
@@ -189,7 +167,7 @@ pub(crate) fn booking<'a>(
     program: &Address,
     m: &Address,
     model: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(
         a.data_len() == BOOKING_LEN || a.data_len() == FEE_BOOKING_LEN,
         2,
@@ -206,7 +184,7 @@ pub(crate) fn booked_user<'a>(
     program: &Address,
     bd: &[u8],
     m: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(&bd[192..224] == u.address().as_ref(), 2)?;
     user(u, program, &addr(bd, 8), m)
 }

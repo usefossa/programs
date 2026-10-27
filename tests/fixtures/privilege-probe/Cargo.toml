@@ -1,0 +1,11 @@
+[package]
+name = "fossa-parity-privilege-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anchor-lang = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }

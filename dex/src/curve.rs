@@ -1,5 +1,5 @@
 use crate::math::{add, check, input, mul_div, narrow, output, sqrt, sub, Result};
-use pinocchio::error::ProgramError;
+use anchor_lang::prelude::ProgramError;
 
 #[derive(Clone, Copy)]
 pub struct Curve {

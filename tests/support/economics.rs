@@ -1,6 +1,7 @@
 use super::*;
 const T22: Address = address!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
+#[track_caller]
 fn external(
     v: &mut Vm,
     program: Address,
@@ -27,7 +28,12 @@ fn external(
         ),
         v.svm.latest_blockhash(),
     );
-    v.svm.send_transaction(tx).unwrap().compute_units_consumed
+    let shadow = parity::run(&v.svm, &tx, v.migration);
+    let result = v.svm.send_transaction(tx);
+    if let Some(shadow) = shadow {
+        shadow.check(&v.svm, &result, "external economics instruction");
+    }
+    result.unwrap().compute_units_consumed
 }
 fn transfer(
     v: &mut Vm,
@@ -80,6 +86,7 @@ fn configure(v: &mut Vm, f: &Fixture, treasury: Address, treasury2: Address) -> 
 }
 pub fn run() {
     listing_payments();
+    parity::fixture("router_economics");
     let mut v = Vm::new(false, false);
     let f = setup(&mut v);
     let admin = v.payer.pubkey();
@@ -260,7 +267,7 @@ pub fn run() {
     let allocation = Keypair::new();
     v.put(backing.pubkey(), TOKEN, vec![0; 165]);
     v.put(allocation.pubkey(), T22, vec![0; 178]);
-    let dex = key();
+    let dex = Address::new_from_array([9; 32]);
     v.svm
         .add_program_from_file(
             dex,
@@ -479,7 +486,15 @@ pub fn run() {
     .unwrap();
     let v0_packet = 1 + 64 * tx.signatures.len() + tx.message.serialize().len();
     assert!(v0_packet <= 1232);
-    let activate_cu = v.svm.send_transaction(tx).unwrap().compute_units_consumed;
+    let keys = tx.message.static_account_keys().iter().copied()
+        .chain(instructions.iter().flat_map(|ix| ix.accounts.iter().map(|a| a.pubkey)))
+        .chain([lookup]).collect();
+    let shadow = parity::run_versioned(&v.svm, &tx, keys, v.migration);
+    let result = v.svm.send_transaction(tx);
+    if let Some(shadow) = shadow {
+        shadow.check(&v.svm, &result, "atomic reserve activation");
+    }
+    let activate_cu = result.unwrap().compute_units_consumed;
     v.executions += 1;
     println!("atomic model activation: legacy={packet}, v0_lookup={v0_packet} serialized bytes with distinct admin, treasury, rent payer and transaction payer");
     v.send(37, &activate, activate_accounts, &[&treasury, &pool], false);
@@ -671,6 +686,7 @@ pub fn run() {
 }
 
 fn listing_payments() {
+    parity::fixture("router_listing_payments");
     let mut v = Vm::new(false, false);
     let f = setup(&mut v);
     let admin = v.payer.pubkey();

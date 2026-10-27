@@ -162,7 +162,7 @@ fn checked_accounting_matches_u128_at_overflow_boundaries() {
 fn all_providers() -> std::vec::Vec<u8> {
     (1..=255u8).flat_map(|key| [key; 32]).collect()
 }
-fn select(t: &[u8], c: &[u8], r: &Request) -> Result<Match, pinocchio::error::ProgramError> {
+fn select(t: &[u8], c: &[u8], r: &Request) -> Result<Match, anchor_lang::prelude::ProgramError> {
     select_on_list(t, c, &all_providers(), r)
 }
 
@@ -171,7 +171,7 @@ fn select_on_list(
     c: &[u8],
     keys: &[u8],
     r: &Request,
-) -> Result<Match, pinocchio::error::ProgramError> {
+) -> Result<Match, anchor_lang::prelude::ProgramError> {
     let count = keys.len() / 32;
     let mut list = std::vec![0;provider_list_len(count.max(1))];
     wr32(&mut list, 72, count.max(1) as u32);

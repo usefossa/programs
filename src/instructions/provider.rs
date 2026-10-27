@@ -2,22 +2,30 @@ use crate::{
     abi::{HEADER_LEN, PROVIDER_LEN, PROVIDER_MAGIC, TERMS_LEN},
     helpers::{addr, err, rd32, require, wr32},
     state::{
-        book, initialize_pda, market, metadata_payload, model, profile, rates, registered_provider,
+        book, initialize_pda, market, metadata_payload, model, rates, registered_provider,
         slot_offset, writable, write_metadata,
     },
     token::token_owned_by,
 };
-use pinocchio::{cpi::Signer, instruction::seeds, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::{Address, ProgramResult};
+use anchor_lang::AnchorAccount;
 
 #[inline(always)]
 pub(crate) fn register_offer(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::RegisterOffer>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, t, c, profile, provider, payout] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut t = *ctx.accounts.t.account();
+    let t = &mut t;
+    let mut c = *ctx.accounts.c.account();
+    let c = &mut c;
+    let profile = ctx.accounts.profile.account();
+    let provider = ctx.accounts.provider.account();
+    let payout = ctx.accounts.payout.account();
     require(p.len() == 24, 3)?;
     rates(&p[4..])?;
     writable(&[t, c])?;
@@ -58,13 +66,16 @@ pub(crate) fn register_offer(
 
 #[inline(always)]
 pub(crate) fn update_offer(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateOffer>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, t, signer] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut t = *ctx.accounts.t.account();
+    let t = &mut t;
+    let signer = ctx.accounts.signer.account();
     require(p.len() == 24, 3)?;
     writable(&[t])?;
     market(m, program)?;
@@ -83,15 +94,20 @@ pub(crate) fn update_offer(
 
 #[inline(always)]
 pub(crate) fn initialize(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeProvider>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, profile, provider, payer, system] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut profile = *ctx.accounts.profile.account();
+    let profile = &mut profile;
+    let provider = ctx.accounts.provider.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
     metadata_payload(p)?;
-    require(system.address() == &pinocchio_system::ID, 3)?;
+    require(system.address() == &anchor_lang::system_program::ID, 3)?;
     market(m, program)?;
     require(provider.is_signer(), 4)?;
     let (address, bump) = Address::derive_program_address(
@@ -105,19 +121,13 @@ pub(crate) fn initialize(
     .ok_or(err(2))?;
     require(profile.address() == &address, 2)?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(
+    let signer_seeds: &[&[u8]] = &[
         b"provider",
         m.address().as_ref(),
         provider.address().as_ref(),
-        &bump_ref
-    );
-    initialize_pda(
-        profile,
-        payer,
-        program,
-        PROVIDER_LEN,
-        Signer::from(&signer_seeds),
-    )?;
+        &bump_ref,
+    ];
+    initialize_pda(profile, payer, program, PROVIDER_LEN, signer_seeds)?;
     let mut d = profile.try_borrow_mut()?;
     d[..8].copy_from_slice(PROVIDER_MAGIC);
     d[8..40].copy_from_slice(m.address().as_ref());
@@ -129,20 +139,35 @@ pub(crate) fn initialize(
 
 #[inline(always)]
 pub(crate) fn update_profile(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateProfile>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, pr, signer] = accounts else {
-        return Err(err(3));
-    };
-    writable(&[pr])?;
-    market(m, program)?;
-    let pd = profile(pr, program, m.address())?;
-    require(signer.is_signer(), 4)?;
+    require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let accounts = &mut ctx.accounts;
+    market(accounts.m.account(), ctx.program_id)?;
+    require(
+        accounts.pr.account().data_len() == PROVIDER_LEN
+            && accounts.pr.market == *accounts.m.address(),
+        2,
+    )?;
+    require(
+        accounts.pr.address()
+            == &Address::derive_address(
+                &[
+                    b"provider",
+                    accounts.m.address().as_ref(),
+                    accounts.pr.authority.as_ref(),
+                ],
+                Some(accounts.pr.bump),
+                ctx.program_id,
+            ),
+        2,
+    )?;
     metadata_payload(p)?;
-    require(&pd[40..72] == signer.address().as_ref(), 4)?;
-    drop(pd);
-    write_metadata(&mut pr.try_borrow_mut()?, 72, 108, p);
+    require(accounts.pr.authority == *accounts.signer.address(), 4)?;
+    accounts.pr.document_hash.copy_from_slice(&p[..32]);
+    accounts.pr.uri_len = ((p.len() - 32) as u16).to_le_bytes();
+    accounts.pr.uri[..p.len() - 32].copy_from_slice(&p[32..]);
+    accounts.pr.uri[p.len() - 32..].fill(0);
     Ok(())
 }

@@ -3,9 +3,8 @@ use crate::{
     helpers::{err, rd16, require},
     state::{initialize_pda, market, metadata_payload, state, writable, write_metadata},
 };
-use pinocchio::{
-    cpi::Signer, error::ProgramError, instruction::seeds, AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::{AccountView, Address, ProgramError, ProgramResult};
+use anchor_lang::AnchorAccount;
 
 pub(crate) fn canonical(
     metadata: &AccountView,
@@ -49,14 +48,20 @@ pub(crate) fn validate(
 }
 
 pub(crate) fn initialize(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeListMetadata>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, list, metadata, authority, payer, system] = accounts else {
-        return Err(err(3));
-    };
-    require(system.address() == &pinocchio_system::ID, 3)?;
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let list = ctx.accounts.list.account();
+    let mut metadata = *ctx.accounts.metadata.account();
+    let metadata = &mut metadata;
+    let authority = ctx.accounts.authority.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    require(system.address() == &anchor_lang::system_program::ID, 3)?;
     metadata_payload(p)?;
     market(m, program)?;
     let ld = super::list::state(list, program)?;
@@ -67,14 +72,8 @@ pub(crate) fn initialize(
     )?;
     let bump = canonical(metadata, list, program)?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(b"list_metadata", list.address().as_ref(), &bump_ref);
-    initialize_pda(
-        metadata,
-        payer,
-        program,
-        LIST_METADATA_LEN,
-        Signer::from(&signer_seeds),
-    )?;
+    let signer_seeds: &[&[u8]] = &[b"list_metadata", list.address().as_ref(), &bump_ref];
+    initialize_pda(metadata, payer, program, LIST_METADATA_LEN, signer_seeds)?;
     let mut d = metadata.try_borrow_mut()?;
     d[..8].copy_from_slice(LIST_METADATA_MAGIC);
     d[8..40].copy_from_slice(m.address().as_ref());
@@ -85,10 +84,17 @@ pub(crate) fn initialize(
     Ok(())
 }
 
-pub(crate) fn update(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, list, metadata, authority] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn update(
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateListMetadata>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let list = ctx.accounts.list.account();
+    let mut metadata = *ctx.accounts.metadata.account();
+    let metadata = &mut metadata;
+    let authority = ctx.accounts.authority.account();
     metadata_payload(p)?;
     writable(&[metadata])?;
     market(m, program)?;

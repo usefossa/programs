@@ -3,7 +3,7 @@ use crate::{
     helpers::{err, fee, rd16, rd32, rd64, require},
     CLAIM_SECONDS,
 };
-use pinocchio::error::ProgramError;
+use anchor_lang::prelude::ProgramError;
 
 pub(crate) struct Request {
     caps: [u32; 3],

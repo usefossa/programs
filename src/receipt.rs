@@ -1,9 +1,10 @@
 use crate::{
     abi::{BOOKING_LEN, BOOK_MAGIC, FEE_BOOKING_LEN, FEE_MARKET_LEN},
-    helpers::{err, rd64, require},
+    helpers::{rd64, require},
     state::{all_zero, fresh, market, user, writable},
 };
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::{AccountView, Address, ProgramError, ProgramResult};
+use anchor_lang::AnchorAccount;
 
 pub const AVAILABLE: u8 = 5;
 pub const RECEIPT_LEN: usize = 120;
@@ -49,7 +50,7 @@ pub fn settled(booking: &AccountView, charge: u64, published: &[u8]) -> ProgramR
     // top-level instruction bytes preserve authenticated receipts without optional cpi traces.
     #[cfg(target_os = "solana")]
     require(
-        unsafe { pinocchio::syscalls::sol_get_stack_height() } == 1,
+        unsafe { anchor_lang::solana_program::instruction::syscalls::sol_get_stack_height() } == 1,
         4,
     )?;
     require(published.len() == RECEIPT_LEN, 3)?;
@@ -71,17 +72,23 @@ pub fn settled(booking: &AccountView, charge: u64, published: &[u8]) -> ProgramR
             &bd[40..72],
             &bd[168..180],
         ];
-        unsafe {
-            pinocchio::syscalls::sol_log_data(log.as_ptr().cast(), log.len() as u64);
-        }
+        anchor_lang::sol_log_data(&log);
     }
     Ok(())
 }
 
-pub fn initialize(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, u, owner, b, payer] = accounts else {
-        return Err(err(3));
-    };
+pub fn initialize(
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeReceipt>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let u = ctx.accounts.u.account();
+    let owner = ctx.accounts.owner.account();
+    let mut b = *ctx.accounts.b.account();
+    let b = &mut b;
+    let payer = ctx.accounts.payer.account();
     require(p.is_empty() && owner.is_signer() && payer.is_signer(), 4)?;
     let md = market(m, program)?;
     user(u, program, owner.address(), m.address())?;

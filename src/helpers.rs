@@ -1,5 +1,5 @@
 use crate::abi::UNIT;
-use pinocchio::{error::ProgramError, Address, ProgramResult};
+use anchor_lang::prelude::{Address, ProgramError, ProgramResult};
 
 pub(crate) fn err(n: u32) -> ProgramError {
     ProgramError::Custom(n)

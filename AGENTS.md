@@ -1,6 +1,6 @@
 # programs
 
-on-chain pinocchio program: `src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt.rs`. `ops/` contains program upgrade tooling.
+on-chain anchor v2 programs: `src/lib.rs` and `dex/src/lib.rs`; account and instruction abi: `src/abi.rs`; active receipt implementation: `src/receipt.rs`. `ops/` contains program upgrade tooling.
 
 ## workflow
 

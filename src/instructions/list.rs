@@ -3,7 +3,8 @@ use crate::{
     helpers::{add, err, rd16, rd32, rd64, require, wr32},
     state::{fresh, market, writable},
 };
-use pinocchio::{account::Ref, error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::{AccountView, Address, ProgramError, ProgramResult};
+use anchor_lang::AnchorAccount;
 
 pub(crate) fn position(providers: &[u8], provider: &[u8]) -> Result<usize, usize> {
     let (mut low, mut high) = (0, providers.len() / 32);
@@ -165,7 +166,7 @@ impl<'a> Members<'a> {
 pub(crate) fn state<'a>(
     a: &'a AccountView,
     program: &Address,
-) -> Result<Ref<'a, [u8]>, ProgramError> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
     require(a.owner() == program && a.data_len() >= LIST_HEADER, 2)?;
     let d = a.try_borrow()?;
     let limit = rd32(&d, 72) as usize;
@@ -182,15 +183,16 @@ pub(crate) fn state<'a>(
 }
 
 pub(crate) fn initialize(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeList>,
     p: &[u8],
 ) -> ProgramResult {
-    require(accounts.len() >= 3, 3)?;
-    let (core, payment) = accounts.split_at_mut(3);
-    let [m, list, authority] = core else {
-        return Err(err(3));
-    };
+    let mut remaining = ctx.remaining_accounts()?;
+    let payment = remaining.as_mut_slice();
+    let m = ctx.accounts.m.account();
+    let mut list = *ctx.accounts.list.account();
+    let list = &mut list;
+    let authority = ctx.accounts.authority.account();
+    let program = ctx.program_id;
     require(authority.is_signer(), 4)?;
     let md = market(m, program)?;
     let fees = md.len() == FEE_MARKET_LEN;
@@ -220,10 +222,16 @@ pub(crate) fn initialize(
     Ok(())
 }
 
-pub(crate) fn update(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, list, authority] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn update(
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateList>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut list = *ctx.accounts.list.account();
+    let list = &mut list;
+    let authority = ctx.accounts.authority.account();
     require(p.len() == 33 && p[32] <= 1 && p[..32] != [0; 32], 3)?;
     writable(&[list])?;
     market(m, program)?;
@@ -256,10 +264,18 @@ pub(crate) fn update(program: &Address, accounts: &mut [AccountView], p: &[u8]) 
     Ok(())
 }
 
-pub(crate) fn close(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [list, authority, metadata] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn close(
+    ctx: &mut anchor_lang::Context<crate::contexts::CloseList>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let mut list = *ctx.accounts.list.account();
+    let list = &mut list;
+    let mut authority = *ctx.accounts.authority.account();
+    let authority = &mut authority;
+    let mut metadata = *ctx.accounts.metadata.account();
+    let metadata = &mut metadata;
     require(p.is_empty() && list.address() != authority.address(), 3)?;
     writable(&[list, authority, metadata])?;
     let d = state(list, program)?;
@@ -269,7 +285,8 @@ pub(crate) fn close(program: &Address, accounts: &mut [AccountView], p: &[u8]) -
     )?;
     require(rd32(&d, 76) == 0, 7)?;
     let bump = super::list_metadata::canonical(metadata, list, program)?;
-    let has_metadata = metadata.owner() != &pinocchio_system::ID || metadata.data_len() != 0;
+    let has_metadata =
+        metadata.owner() != &anchor_lang::system_program::ID || metadata.data_len() != 0;
     if has_metadata {
         super::list_metadata::validate(metadata, list, &d, program, bump)?;
     }

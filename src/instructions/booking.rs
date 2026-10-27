@@ -13,16 +13,30 @@ use crate::{
     token::{token_owned_by, user_payments, user_transfer, user_vault, vault_owned_by},
     CLAIM_SECONDS,
 };
-use pinocchio::{
-    sysvars::{clock::Clock, Sysvar},
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::Clock;
+use anchor_lang::prelude::{AccountView, Address, ProgramResult};
+use anchor_lang::solana_program::sysvar::Sysvar as _;
+use anchor_lang::AnchorAccount;
 
 #[inline(always)]
-pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [m, mo, t, c, u, owner, b, rent_payer, list] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn reserve(
+    ctx: &mut anchor_lang::Context<crate::contexts::ReserveBooking>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let t = ctx.accounts.t.account();
+    let mut c = *ctx.accounts.c.account();
+    let c = &mut c;
+    let mut u = *ctx.accounts.u.account();
+    let u = &mut u;
+    let owner = ctx.accounts.owner.account();
+    let mut b = *ctx.accounts.b.account();
+    let b = &mut b;
+    let rent_payer = ctx.accounts.rent_payer.account();
+    let list = ctx.accounts.list.account();
     require(owner.is_signer(), 4)?;
     writable(&[c, u])?;
     let md = market(m, program)?;
@@ -138,14 +152,32 @@ pub(crate) fn reserve(program: &Address, accounts: &mut [AccountView], p: &[u8])
 }
 
 #[inline(always)]
-pub(crate) fn claim(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    require(accounts.len() == 11 || accounts.len() == 13, 3)?;
-    let (core, destinations) = accounts.split_at_mut(11);
-    let [m, mo, c, u, b, provider, vault, payout, mint, authority, token] = core else {
-        return Err(err(3));
-    };
+pub(crate) fn claim(
+    ctx: &mut anchor_lang::Context<crate::contexts::ClaimBooking>,
+    p: &[u8],
+) -> ProgramResult {
+    let mut remaining = ctx.remaining_accounts()?;
+    let destinations = remaining.as_mut_slice();
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut c = *ctx.accounts.c.account();
+    let c = &mut c;
+    let mut u = *ctx.accounts.u.account();
+    let u = &mut u;
+    let mut b = *ctx.accounts.b.account();
+    let b = &mut b;
+    let provider = ctx.accounts.provider.account();
+    let mut vault = *ctx.accounts.vault.account();
+    let vault = &mut vault;
+    let mut payout = *ctx.accounts.payout.account();
+    let payout = &mut payout;
+    let mint = ctx.accounts.mint.account();
+    let authority = ctx.accounts.authority.account();
+    let token = ctx.accounts.token.account();
+    let program = ctx.program_id;
+    require(destinations.is_empty() || destinations.len() == 2, 3)?;
     require(p.len() == 12 || p.len() == 140, 3)?;
-    require(token.address() == &pinocchio_token::ID, 3)?;
+    require(token.address() == &anchor_spl::token::ID, 3)?;
     require(provider.is_signer(), 4)?;
     writable(&[c, u, b, vault, payout])?;
     let md = market(m, program)?;
@@ -320,10 +352,16 @@ pub(crate) fn release(
 }
 
 #[inline(always)]
-pub(crate) fn close(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    let [a, recipient] = accounts else {
-        return Err(err(3));
-    };
+pub(crate) fn close(
+    ctx: &mut anchor_lang::Context<crate::contexts::CloseBooking>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let mut a = *ctx.accounts.a.account();
+    let a = &mut a;
+    let mut recipient = *ctx.accounts.recipient.account();
+    let recipient = &mut recipient;
     require(p.is_empty() && a.address() != recipient.address(), 3)?;
     writable(&[a, recipient])?;
     require(a.owner() == program, 2)?;

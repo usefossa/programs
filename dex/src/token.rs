@@ -1,6 +1,5 @@
 use crate::math::{check, fee, gross, sub, Result};
-use pinocchio::{cpi::Signer, AccountView, Address};
-use pinocchio_token::{instructions::transfer_checked::TransferChecked, TokenProgram};
+use anchor_lang::prelude::{AccountView, Address};
 
 pub const TOKEN_2022: Address =
     Address::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -31,7 +30,7 @@ impl Mint {
 pub fn mint(account: &AccountView, token: &AccountView, epoch: u64, quote: bool) -> Result<Mint> {
     check(token.executable() && account.owner() == token.address(), 2)?;
     check(
-        token.address() == &pinocchio_token::ID || token.address() == &TOKEN_2022,
+        token.address() == &anchor_spl::token::ID || token.address() == &TOKEN_2022,
         2,
     )?;
     parse_mint(
@@ -144,7 +143,7 @@ pub fn transfer(
     owner: &AccountView,
     amount: u64,
     decimals: u8,
-    signers: &[Signer],
+    signers: &[&[&[u8]]],
 ) -> Result<u64> {
     check(
         from.address() != to.address() && from.is_writable() && to.is_writable(),
@@ -152,8 +151,16 @@ pub fn transfer(
     )?;
     let before_from = balance(from)?;
     let before_to = balance(to)?;
-    TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, owner, amount, decimals)
-        .invoke_signed_with_program(signers, mint.owner())?;
+    crate::cross_program::transfer_checked(
+        from,
+        mint,
+        to,
+        owner,
+        mint.owner(),
+        amount,
+        decimals,
+        signers,
+    )?;
     check(sub(before_from, balance(from)?)? == amount, 2)?;
     sub(balance(to)?, before_to)
 }

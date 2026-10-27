@@ -1,8 +1,10 @@
 use crate::helpers::{add, err, rd16, rd64, require};
-use pinocchio::{cpi::Signer, instruction::seeds, AccountView, Address, ProgramResult};
-use pinocchio_token::{
-    instructions::transfer_checked::TransferChecked, state::Account as TokenAccount, TokenProgram,
-};
+use anchor_lang::prelude::Clock;
+use anchor_lang::prelude::{Account, AnchorAccount};
+use anchor_lang::prelude::{AccountView, Address, ProgramResult};
+#[allow(unused_imports)]
+use anchor_lang::solana_program::sysvar::Sysvar as _;
+use anchor_spl::token::TokenAccount;
 
 pub(crate) const TOKEN_2022: Address =
     Address::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -12,7 +14,7 @@ pub(crate) struct PaymentMint {
     pub cap: u64,
 }
 impl PaymentMint {
-    pub(crate) fn gross(&self, net: u64) -> Result<(u8, u64), pinocchio::error::ProgramError> {
+    pub(crate) fn gross(&self, net: u64) -> Result<(u8, u64), anchor_lang::prelude::ProgramError> {
         let gross = if self.bps == 0 || net == 0 {
             net
         } else {
@@ -63,9 +65,9 @@ fn extensions(
 pub(crate) fn payment_mint(
     mint: &AccountView,
     token: &Address,
-) -> Result<PaymentMint, pinocchio::error::ProgramError> {
+) -> Result<PaymentMint, anchor_lang::prelude::ProgramError> {
     require(
-        (token == &pinocchio_token::ID || token == &TOKEN_2022) && mint.owner() == token,
+        (token == &anchor_spl::token::ID || token == &TOKEN_2022) && mint.owner() == token,
         2,
     )?;
     let d = mint.try_borrow()?;
@@ -75,12 +77,11 @@ pub(crate) fn payment_mint(
         bps: 0,
         cap: 0,
     };
-    if token == &pinocchio_token::ID || d.len() == 82 {
+    if token == &anchor_spl::token::ID || d.len() == 82 {
         require(d.len() == 82, 2)?;
     } else {
         extensions(&d, true, |kind, ext| match kind {
             1 => {
-                use pinocchio::sysvars::{clock::Clock, Sysvar};
                 require(
                     ext.len() == 108 && rd16(ext, 88) <= 10_000 && rd16(ext, 106) <= 10_000,
                     2,
@@ -110,7 +111,7 @@ pub(crate) fn payment_token(
     token: &Address,
 ) -> ProgramResult {
     require(
-        (token == &pinocchio_token::ID || token == &TOKEN_2022) && account.owner() == token,
+        (token == &anchor_spl::token::ID || token == &TOKEN_2022) && account.owner() == token,
         2,
     )?;
     let d = account.try_borrow()?;
@@ -118,7 +119,7 @@ pub(crate) fn payment_token(
         d.len() >= 165 && &d[..32] == mint.as_ref() && &d[32..64] == owner.as_ref() && d[108] == 1,
         2,
     )?;
-    if token == &pinocchio_token::ID || d.len() == 165 {
+    if token == &anchor_spl::token::ID || d.len() == 165 {
         require(d.len() == 165, 2)
     } else {
         extensions(&d, false, |kind, ext| match kind {
@@ -139,33 +140,7 @@ pub(crate) fn payment_transfer(
     decimals: u8,
 ) -> ProgramResult {
     require(from.address() != to.address(), 2)?;
-    TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, authority, amount, decimals)
-        .invoke_with_program(token)
-}
-
-pub(crate) fn raw<const N: usize>(
-    token: &Address,
-    accounts: [&AccountView; N],
-    flags: [(bool, bool); N],
-    data: &[u8],
-    signers: &[Signer],
-) -> ProgramResult {
-    use pinocchio::{
-        cpi::invoke_signed,
-        instruction::{InstructionAccount, InstructionView},
-    };
-    let metas = core::array::from_fn::<_, N, _>(|i| {
-        InstructionAccount::new(accounts[i].address(), flags[i].0, flags[i].1)
-    });
-    invoke_signed(
-        &InstructionView {
-            program_id: token,
-            accounts: &metas,
-            data,
-        },
-        &accounts,
-        signers,
-    )
+    crate::cross_program::transfer_checked(from, mint, to, authority, token, amount, decimals, &[])
 }
 
 pub(crate) fn token_owned_by(
@@ -173,7 +148,7 @@ pub(crate) fn token_owned_by(
     mint: &Address,
     owner: &Address,
 ) -> ProgramResult {
-    let d = TokenAccount::from_account_view(token)?;
+    let d = Account::<TokenAccount>::load(*token)?;
     require(
         d.is_initialized() && d.mint() == mint && d.owner() == owner,
         2,
@@ -185,7 +160,7 @@ pub(crate) fn vault_owned_by(
     authority: &Address,
 ) -> ProgramResult {
     token_owned_by(vault, mint, authority)?;
-    let d = TokenAccount::from_account_view(vault)?;
+    let d = Account::<TokenAccount>::load(*vault)?;
     require(
         !d.has_delegate() && !d.has_close_authority() && !d.is_native(),
         2,
@@ -229,16 +204,6 @@ pub(crate) fn bond_vault(
     );
     vault_owned_by(vault, mint.address(), &authority)
 }
-pub(crate) fn transfer(
-    from: &AccountView,
-    mint: &AccountView,
-    to: &AccountView,
-    authority: &AccountView,
-    amount: u64,
-) -> ProgramResult {
-    TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, authority, amount, 6)
-        .invoke()
-}
 pub(crate) fn user_transfer(
     accounts: [&AccountView; 4],
     lane: &Address,
@@ -253,9 +218,17 @@ pub(crate) fn user_transfer(
         2,
     )?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(b"vault", lane.as_ref(), &bump_ref);
-    TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, authority, amount, 6)
-        .invoke_signed(&[Signer::from(&signer_seeds)])
+    let signer_seeds: &[&[u8]] = &[b"vault", lane.as_ref(), &bump_ref];
+    crate::cross_program::transfer_checked(
+        from,
+        mint,
+        to,
+        authority,
+        &anchor_spl::token::ID,
+        amount,
+        6,
+        &[signer_seeds],
+    )
 }
 pub(crate) fn user_payments(
     accounts: [&AccountView; 3],
@@ -271,7 +244,7 @@ pub(crate) fn user_payments(
         2,
     )?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(b"vault", lane.as_ref(), &bump_ref);
+    let signer_seeds: &[&[u8]] = &[b"vault", lane.as_ref(), &bump_ref];
     for i in 0..payments.len() {
         for j in i + 1..payments.len() {
             if payments[i].0.address() == payments[j].0.address() {
@@ -280,15 +253,16 @@ pub(crate) fn user_payments(
             }
         }
         if payments[i].1 > 0 {
-            TransferChecked::<&AccountView, TokenProgram>::new(
+            crate::cross_program::transfer_checked(
                 from,
                 mint,
                 payments[i].0,
                 authority,
+                &anchor_spl::token::ID,
                 payments[i].1,
                 6,
-            )
-            .invoke_signed(&[Signer::from(&signer_seeds)])?;
+                &[signer_seeds],
+            )?;
         }
     }
     Ok(())
@@ -310,7 +284,15 @@ pub(crate) fn bond_transfer(
         2,
     )?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(b"bond", model.as_ref(), &slot_ref, &bump_ref);
-    TransferChecked::<&AccountView, TokenProgram>::new(from, mint, to, authority, amount, 6)
-        .invoke_signed(&[Signer::from(&signer_seeds)])
+    let signer_seeds: &[&[u8]] = &[b"bond", model.as_ref(), &slot_ref, &bump_ref];
+    crate::cross_program::transfer_checked(
+        from,
+        mint,
+        to,
+        authority,
+        &anchor_spl::token::ID,
+        amount,
+        6,
+        &[signer_seeds],
+    )
 }

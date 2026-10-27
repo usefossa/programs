@@ -9,21 +9,28 @@ use crate::{
         writable, write_metadata,
     },
 };
-use pinocchio::{cpi::Signer, instruction::seeds, AccountView, Address, ProgramResult};
-use pinocchio_token::state::Mint;
+use anchor_lang::prelude::Rent;
+use anchor_lang::prelude::{AccountView, Address, ProgramResult};
+use anchor_lang::solana_program::sysvar::Sysvar as _;
+use anchor_lang::AnchorAccount;
+
+use anchor_lang::prelude::Account;
+use anchor_spl::mint::Mint;
 
 #[inline(always)]
 pub(crate) fn initialize(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeMarket>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, admin, mint] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let mut m = *ctx.accounts.m.account();
+    let m = &mut m;
+    let admin = ctx.accounts.admin.account();
+    let mint = ctx.accounts.mint.account();
     require(p.is_empty() && admin.is_signer(), 3)?;
     fresh(m, program, MARKET_LEN)?;
-    let mt = Mint::from_account_view(mint)?;
+    let mt = Account::<Mint>::load(*mint)?;
     require(mt.is_initialized() && mt.decimals() == 6, 2)?;
     let mut d = m.try_borrow_mut()?;
     d[..8].copy_from_slice(MARKET_MAGIC);
@@ -34,15 +41,27 @@ pub(crate) fn initialize(
 
 #[inline(always)]
 pub(crate) fn initialize_model(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeModel>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, t, c, provider, payer, system, profile, metadata] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut mo = *ctx.accounts.mo.account();
+    let mo = &mut mo;
+    let mut t = *ctx.accounts.t.account();
+    let t = &mut t;
+    let mut c = *ctx.accounts.c.account();
+    let c = &mut c;
+    let provider = ctx.accounts.provider.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    let profile = ctx.accounts.profile.account();
+    let mut metadata = *ctx.accounts.metadata.account();
+    let metadata = &mut metadata;
     require(
-        p.len() >= 36 && system.address() == &pinocchio_system::ID,
+        p.len() >= 36 && system.address() == &anchor_lang::system_program::ID,
         3,
     )?;
     metadata_payload(&p[36..])?;
@@ -70,21 +89,15 @@ pub(crate) fn initialize_model(
             .ok_or(err(2))?;
     require(mo.address() == &address, 2)?;
     let bump_ref = [bump];
-    let signer_seeds = seeds!(b"model", m.address().as_ref(), &p[..32], &bump_ref);
-    initialize_pda(mo, payer, program, MODEL_LEN, Signer::from(&signer_seeds))?;
+    let signer_seeds: &[&[u8]] = &[b"model", m.address().as_ref(), &p[..32], &bump_ref];
+    initialize_pda(mo, payer, program, MODEL_LEN, signer_seeds)?;
     let (address, meta_bump) =
         Address::derive_program_address(&[b"model_metadata", mo.address().as_ref()], program)
             .ok_or(err(2))?;
     require(metadata.address() == &address, 2)?;
     let meta_bump_ref = [meta_bump];
-    let meta_seeds = seeds!(b"model_metadata", mo.address().as_ref(), &meta_bump_ref);
-    initialize_pda(
-        metadata,
-        payer,
-        program,
-        MODEL_METADATA_LEN,
-        Signer::from(&meta_seeds),
-    )?;
+    let meta_seeds: &[&[u8]] = &[b"model_metadata", mo.address().as_ref(), &meta_bump_ref];
+    initialize_pda(metadata, payer, program, MODEL_METADATA_LEN, meta_seeds)?;
     let mut d = metadata.try_borrow_mut()?;
     d[..8].copy_from_slice(MODEL_METADATA_MAGIC);
     d[8..40].copy_from_slice(m.address().as_ref());
@@ -113,13 +126,16 @@ pub(crate) fn initialize_model(
 
 #[inline(always)]
 pub(crate) fn update_metadata(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateModelMetadata>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, mo, metadata, provider] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mo = ctx.accounts.mo.account();
+    let mut metadata = *ctx.accounts.metadata.account();
+    let metadata = &mut metadata;
+    let provider = ctx.accounts.provider.account();
     metadata_payload(p)?;
     writable(&[metadata])?;
     market(m, program)?;
@@ -145,16 +161,26 @@ pub(crate) fn update_metadata(
     Ok(())
 }
 
-pub(crate) fn grow(program: &Address, accounts: &mut [AccountView], p: &[u8]) -> ProgramResult {
-    use pinocchio::{
-        sysvars::{rent::Rent, Sysvar},
-        Resize,
-    };
-    use pinocchio_system::instructions::Transfer;
-    let [m, mo, t, c, payer, system] = accounts else {
-        return Err(err(3));
-    };
-    require(p.len() == 4 && system.address() == &pinocchio_system::ID, 3)?;
+pub(crate) fn grow(
+    ctx: &mut anchor_lang::Context<crate::contexts::GrowBooks>,
+    p: &[u8],
+) -> ProgramResult {
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut mo = *ctx.accounts.mo.account();
+    let mo = &mut mo;
+    let mut t = *ctx.accounts.t.account();
+    let t = &mut t;
+    let mut c = *ctx.accounts.c.account();
+    let c = &mut c;
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    require(
+        p.len() == 4 && system.address() == &anchor_lang::system_program::ID,
+        3,
+    )?;
     require(payer.is_signer(), 4)?;
     writable(&[mo, t, c, payer])?;
     market(m, program)?;
@@ -170,14 +196,9 @@ pub(crate) fn grow(program: &Address, accounts: &mut [AccountView], p: &[u8]) ->
     for (account, len) in [(t, terms_book_len(limit)), (c, capacity_book_len(limit))] {
         let minimum = rent.try_minimum_balance(len)?;
         if account.lamports() < minimum {
-            Transfer {
-                from: payer,
-                to: account,
-                lamports: minimum - account.lamports(),
-            }
-            .invoke()?;
+            crate::cross_program::transfer_lamports(payer, account, minimum - account.lamports())?;
         }
-        account.resize(len)?;
+        anchor_lang::cpi::realloc_account(account, len, payer, true)?;
         wr32(&mut account.try_borrow_mut()?, 40, limit as u32);
     }
     wr32(&mut mo.try_borrow_mut()?, 136, limit as u32);

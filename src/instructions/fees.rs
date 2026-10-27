@@ -4,11 +4,10 @@ use crate::{
     state::{market, writable},
     token::{payment_mint, payment_token, payment_transfer},
 };
-use pinocchio::{
-    sysvars::{rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult, Resize,
-};
-use pinocchio_system::instructions::Transfer;
+use anchor_lang::prelude::Rent;
+use anchor_lang::prelude::{AccountView, ProgramResult};
+use anchor_lang::solana_program::sysvar::Sysvar as _;
+use anchor_lang::AnchorAccount;
 
 pub(crate) fn admin(md: &[u8], signer: &AccountView) -> ProgramResult {
     require(
@@ -17,20 +16,18 @@ pub(crate) fn admin(md: &[u8], signer: &AccountView) -> ProgramResult {
     )
 }
 pub(crate) fn rotate_admin(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::RotateAdmin>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, current, next] = accounts else {
-        return Err(err(3));
-    };
-    require(p.is_empty() && current.address() != next.address(), 3)?;
-    writable(&[m])?;
-    let md = market(m, program)?;
-    admin(&md, current)?;
-    require(next.is_signer(), 4)?;
-    drop(md);
-    m.try_borrow_mut()?[8..40].copy_from_slice(next.address().as_ref());
+    require(ctx.remaining_accounts()?.is_empty() && p.is_empty(), 3)?;
+    let accounts = &mut ctx.accounts;
+    require(accounts.current.address() != accounts.next.address(), 3)?;
+    require(
+        matches!(accounts.m.account().data_len(), MARKET_LEN | FEE_MARKET_LEN),
+        2,
+    )?;
+    require(accounts.m.admin == *accounts.current.address(), 4)?;
+    accounts.m.admin = *accounts.next.address();
     Ok(())
 }
 
@@ -42,14 +39,9 @@ pub(crate) fn grow(account: &mut AccountView, payer: &AccountView, len: usize) -
     }
     let rent = Rent::get()?.try_minimum_balance(len)?;
     if account.lamports() < rent {
-        Transfer {
-            from: payer,
-            to: account,
-            lamports: rent - account.lamports(),
-        }
-        .invoke()?;
+        crate::cross_program::transfer_lamports(payer, account, rent - account.lamports())?;
     }
-    account.resize(len)
+    anchor_lang::cpi::realloc_account(account, len, payer, true)
 }
 
 pub(crate) fn validate_terms(fee: u16, protocol_share: u16) -> ProgramResult {
@@ -61,20 +53,24 @@ pub(crate) fn validate_terms(fee: u16, protocol_share: u16) -> ProgramResult {
 }
 
 pub(crate) fn configure(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::ConfigureFees>,
     p: &[u8],
 ) -> ProgramResult {
+    let mut remaining = ctx.remaining_accounts()?;
+    let extra = remaining.as_mut_slice();
+    let mut m = *ctx.accounts.m.account();
+    let m = &mut m;
+    let signer = ctx.accounts.signer.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    let program = ctx.program_id;
     require(
         p.len() == 137 && p[136] <= 1 && p[..32] != [0; 32] && p[32..64] != [0; 32],
         3,
     )?;
-    require(accounts.len() == if p[136] == 1 { 6 } else { 4 }, 3)?;
-    let (core, extra) = accounts.split_at_mut(4);
-    let [m, signer, payer, system] = core else {
-        return Err(err(3));
-    };
-    require(system.address() == &pinocchio_system::ID, 3)?;
+    require(extra.len() == if p[136] == 1 { 2 } else { 0 }, 3)?;
+    require(system.address() == &anchor_lang::system_program::ID, 3)?;
     let md = market(m, program)?;
     admin(&md, signer)?;
     if p[136] == 1 {
@@ -95,13 +91,16 @@ pub(crate) fn configure(
 }
 
 pub(crate) fn configure_dex(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::ConfigureDex>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, admin, dex, config] = accounts else {
-        return Err(err(3));
-    };
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let mut m = *ctx.accounts.m.account();
+    let m = &mut m;
+    let admin = ctx.accounts.admin.account();
+    let dex = ctx.accounts.dex.account();
+    let config = ctx.accounts.config.account();
     require(
         p.is_empty()
             && dex.executable()
@@ -126,14 +125,22 @@ pub(crate) fn configure_dex(
 }
 
 pub(crate) fn configure_list(
-    program: &Address,
-    accounts: &mut [AccountView],
+    ctx: &mut anchor_lang::Context<crate::contexts::ConfigureListFees>,
     p: &[u8],
 ) -> ProgramResult {
-    let [m, list, authority, payer, system] = accounts else {
-        return Err(err(3));
-    };
-    require(p.len() == 4 && system.address() == &pinocchio_system::ID, 3)?;
+    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
+    let program = ctx.program_id;
+    let m = ctx.accounts.m.account();
+    let mut list = *ctx.accounts.list.account();
+    let list = &mut list;
+    let authority = ctx.accounts.authority.account();
+    let mut payer = *ctx.accounts.payer.account();
+    let payer = &mut payer;
+    let system = ctx.accounts.system.account();
+    require(
+        p.len() == 4 && system.address() == &anchor_lang::system_program::ID,
+        3,
+    )?;
     validate_terms(rd16(p, 0), rd16(p, 2))?;
     require(market(m, program)?.len() == FEE_MARKET_LEN, 7)?;
     let d = super::list::state(list, program)?;

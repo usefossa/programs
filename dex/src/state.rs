@@ -3,11 +3,9 @@ use crate::{
     math::{add, check, Result},
     token::{self, read_u64, Mint},
 };
-use pinocchio::{
-    account::Ref,
-    sysvars::{rent::Rent, Sysvar},
-    AccountView, Address,
-};
+use anchor_lang::prelude::Rent;
+use anchor_lang::prelude::{AccountView, Address};
+use anchor_lang::solana_program::sysvar::Sysvar as _;
 
 pub fn write_u64(data: &mut [u8], at: usize, value: u64) {
     data[at..at + 8].copy_from_slice(&value.to_le_bytes());
@@ -49,7 +47,7 @@ pub fn state<'a>(
     program: &Address,
     len: usize,
     magic: &[u8; 8],
-) -> Result<Ref<'a, [u8]>> {
+) -> Result<impl core::ops::Deref<Target = [u8]> + 'a> {
     check(account.owner() == program && account.data_len() == len, 2)?;
     let data = account.try_borrow()?;
     check(&data[..8] == magic, 2)?;
@@ -73,7 +71,7 @@ pub fn authority(
 }
 pub fn lp(mint: &AccountView, authority: &Address) -> Result<u64> {
     check(
-        mint.owner() == &pinocchio_token::ID && mint.data_len() == 82,
+        mint.owner() == &anchor_spl::token::ID && mint.data_len() == 82,
         2,
     )?;
     let d = mint.try_borrow()?;

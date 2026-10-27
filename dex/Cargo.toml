@@ -1,6 +1,6 @@
 [package]
 name = "fossa-dex"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -8,13 +8,13 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = []
+default = ["no-log-ix-name"]
+no-log-ix-name = []
 no-entrypoint = []
 
 [dependencies]
-pinocchio = { version = "0.11.2", features = ["cpi"] }
-pinocchio-token = "0.7.0"
-pinocchio-system = "0.6.1"
+anchor-lang = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
+anchor-spl = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
 
 [profile.release]
 overflow-checks = true

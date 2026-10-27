@@ -14,6 +14,8 @@ mod abi;
 use abi::*;
 #[path = "mod.rs"]
 mod support;
+#[path = "parity.rs"]
+mod parity;
 const TOKEN: Address = address!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const SYSTEM: Address = address!("11111111111111111111111111111111");
 fn key() -> Address {
@@ -56,11 +58,12 @@ struct Vm {
     program: Address,
     payer: Keypair,
     executions: usize,
+    migration: bool,
 }
 impl Vm {
     fn new(legacy_token: bool, migration: bool) -> Self {
         let mut svm = support::svm(legacy_token);
-        let program = key();
+        let program = Address::new_from_array([8; 32]);
         if migration {
             svm.add_program_from_file(
                 program,
@@ -80,6 +83,7 @@ impl Vm {
             program,
             payer,
             executions: 0,
+            migration,
         }
     }
     fn put(&mut self, address: Address, owner: Address, data: Vec<u8>) {
@@ -117,6 +121,7 @@ impl Vm {
     fn data(&self, address: Address) -> Vec<u8> {
         self.svm.get_account(&address).unwrap().data
     }
+    #[track_caller]
     fn send(
         &mut self,
         op: u8,
@@ -127,6 +132,7 @@ impl Vm {
     ) -> u64 {
         self.send_with_prefix(op, payload, accounts, signers, succeeds, vec![])
     }
+    #[track_caller]
     fn send_with_prefix(
         &mut self,
         op: u8,
@@ -180,7 +186,12 @@ impl Vm {
                 "activation packet {packet_len} exceeds 1232 bytes"
             );
         }
-        match self.svm.send_transaction(tx) {
+        let shadow = parity::run(&self.svm, &tx, self.migration);
+        let result = self.svm.send_transaction(tx);
+        if let Some(shadow) = shadow {
+            shadow.check(&self.svm, &result, &format!("router opcode {op}"));
+        }
+        match result {
             Ok(meta) => {
                 assert!(succeeds, "opcode {op} unexpectedly succeeded");
                 if op == 37 {
@@ -531,6 +542,7 @@ fn reconcile(v: &Vm, f: &Fixture, open: &[Address], paid: u64) {
 }
 
 pub fn run(legacy_token: bool) {
+    parity::fixture(format!("router_protocol_legacy={legacy_token}"));
     let mut v = Vm::new(legacy_token, false);
     let f = setup(&mut v);
     let payer = v.payer.pubkey();
@@ -859,6 +871,7 @@ pub fn run(legacy_token: bool) {
 }
 
 pub fn migration(legacy_token: bool) {
+    parity::fixture(format!("router_migration_legacy={legacy_token}"));
     let mut v = Vm::new(legacy_token, true);
     let f = setup(&mut v);
     let slot = 0u32;
@@ -975,6 +988,7 @@ fn scale_with_token(
     legacy: bool,
     fees: bool,
 ) {
+    parity::fixture(format!("router_scale_offers={count}_members={list_count}_mode={mode}_cached={cached}_legacy={legacy}_fees={fees}"));
     let mut v = Vm::new(legacy, false);
     let mut f = setup(&mut v);
     let mut keys = vec![[0u8; 32]; list_count];
@@ -1163,6 +1177,7 @@ pub fn scale() {
 }
 
 pub fn growth() {
+    parity::fixture("router_growth");
     let mut v = Vm::new(false, false);
     let f = setup(&mut v);
     let payer = Keypair::new();
@@ -1252,6 +1267,7 @@ pub fn growth() {
 }
 
 pub fn list_metadata() {
+    parity::fixture("router_list_metadata");
     let mut v = Vm::new(false, false);
     let f = setup(&mut v);
     let list = f.list.pubkey();

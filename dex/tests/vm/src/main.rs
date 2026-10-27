@@ -6,6 +6,8 @@ use solana_keypair::Keypair;
 use solana_message::Message;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
+#[path = "../../../../tests/support/parity.rs"]
+mod parity;
 
 #[allow(dead_code)]
 #[path = "../../../src/abi.rs"]
@@ -44,7 +46,7 @@ struct Vm {
 impl Vm {
     fn new() -> Self {
         let mut svm = LiteSVM::new();
-        let program = k();
+        let program = Address::new_from_array([9; 32]);
         let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deploy/fossa_dex.so");
         svm.add_program_from_file(program, artifact).unwrap();
@@ -160,6 +162,7 @@ impl Vm {
         a.data = d;
         self.svm.set_account(key, a).unwrap();
     }
+    #[track_caller]
     fn call(
         &mut self,
         label: &str,
@@ -193,7 +196,11 @@ impl Vm {
             Message::new(&[ix], Some(&self.payer.pubkey())),
             self.svm.latest_blockhash(),
         );
+        let shadow = parity::run(&self.svm, &tx, false);
         let result = self.svm.send_transaction(tx);
+        if let Some(shadow) = shadow {
+            shadow.check(&self.svm, &result, label);
+        }
         match result {
             Ok(m) => {
                 assert!(ok, "{label} unexpectedly succeeded");
@@ -375,6 +382,7 @@ fn swap_data(direction: u8, amount: u64, limit: u64) -> Vec<u8> {
 }
 
 fn amm() {
+    parity::fixture("dex_amm");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, false, STANDARD, true);
     let user = vm.payer.pubkey();
@@ -528,7 +536,21 @@ fn amm() {
     );
 }
 
+fn benchmark_plain_amm() {
+    parity::fixture("dex_plain_amm");
+    let mut vm = Vm::new();
+    let f = PoolFixture::new(&mut vm, false, STANDARD, false);
+    let user = vm.payer.pubkey();
+    vm.call("initialize amm", 1, numbers(&[500_000_000, 500_000_000, 1]), f.init(user), &[&f.pool], true);
+    vm.call("amm exact in", 3, swap_data(1, 1_000_000, 1), f.swap(user), &[], true);
+    vm.call("amm exact out", 4, swap_data(0, 1_000_000, 10_000_000), f.swap(user), &[], true);
+    vm.call("add liquidity", 6, numbers(&[10_000, 1_000_000, 1_000_000]), f.liquidity(user), &[], true);
+    vm.call("remove liquidity", 7, numbers(&[10_000, 1, 1]), f.liquidity(user), &[], true);
+    vm.call("claim protocol fees", 8, swap_data(0, 0, 0), f.swap(user), &[], true);
+}
+
 fn curve(mode: u8, kind: u8) {
+    parity::fixture(format!("dex_curve_mode={mode}_kind={kind}"));
     println!("curve kind={kind} mode={mode}");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, true, mode, true);
@@ -770,6 +792,7 @@ fn gross_effective(amount: u64, standard: bool, tax_bps: u64) -> u64 {
 }
 
 fn terminal_dust_and_vesting() {
+    parity::fixture("dex_terminal_dust_and_vesting");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, true, STANDARD, true);
     let user = vm.payer.pubkey();
@@ -896,6 +919,7 @@ fn terminal_dust_and_vesting() {
 }
 
 fn model_graduation_roundtrip() {
+    parity::fixture("dex_model_graduation_roundtrip");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, false, STANDARD, false);
     let user = vm.payer.pubkey();
@@ -966,6 +990,7 @@ fn model_graduation_roundtrip() {
 }
 
 fn admin_boundaries() {
+    parity::fixture("dex_admin_boundaries");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, false, STANDARD, false);
     let user = vm.payer.pubkey();
@@ -1103,6 +1128,7 @@ fn admin_boundaries() {
 }
 
 fn rounding_cycles_preserve_graduation() {
+    parity::fixture("dex_rounding_cycles_preserve_graduation");
     let mut vm = Vm::new();
     let f = PoolFixture::new(&mut vm, true, STANDARD, false);
     let user = vm.payer.pubkey();
@@ -1160,5 +1186,13 @@ fn main() {
     model_graduation_roundtrip();
     admin_boundaries();
     rounding_cycles_preserve_graduation();
+    if std::env::var_os("FOSSA_BENCH_CSV").is_some() {
+        benchmark_plain_amm();
+        for mode in [REWARD, COMMUNITY] {
+            for kind in 1..3 {
+                curve(mode, kind);
+            }
+        }
+    }
     println!("all dex SBF scenarios passed");
 }
