@@ -19,18 +19,21 @@ use curve::Curve;
 use math::{add, check, fee, gross, mul_div, sqrt, sub};
 use state::{address, distinct, fresh, key, lp, rates, state, writable, Pool};
 use token::{read_u16, read_u64};
-use wire::Payload;
+use wire::{FixedPayload, OptionalTail};
 pub const ID: Address = Address::new_from_array([9; 32]);
 
 #[program]
 pub mod fossa_dex {
     use super::*;
     #[discrim = 0]
-    pub fn initialize_config(ctx: &mut Context<InitializeConfig>, p: Payload) -> Result<()> {
+    pub fn initialize_config(
+        ctx: &mut Context<InitializeConfig>,
+        p: OptionalTail<38, 32>,
+    ) -> Result<()> {
         handlers::initialize_config(ctx, &p.0)
     }
     #[discrim = 1]
-    pub fn initialize_pool(ctx: &mut Context<InitializePool>, p: Payload) -> Result<()> {
+    pub fn initialize_pool(ctx: &mut Context<InitializePool>, p: FixedPayload<24>) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::initialize(
             ctx.program_id,
@@ -56,7 +59,10 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 2]
-    pub fn initialize_curve(ctx: &mut Context<InitializeCurve>, p: Payload) -> Result<()> {
+    pub fn initialize_curve(
+        ctx: &mut Context<InitializeCurve>,
+        p: OptionalTail<43, 1>,
+    ) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::initialize(
             ctx.program_id,
@@ -84,7 +90,7 @@ pub mod fossa_dex {
     #[discrim = 9]
     pub fn initialize_model_curve(
         ctx: &mut Context<InitializeModelCurve>,
-        p: Payload,
+        p: FixedPayload<40>,
     ) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::global_admin(
@@ -116,7 +122,7 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 3]
-    pub fn swap(ctx: &mut Context<Swap>, p: Payload) -> Result<()> {
+    pub fn swap(ctx: &mut Context<Swap>, p: FixedPayload<17>) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::swap(
             ctx.program_id,
@@ -138,7 +144,7 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 4]
-    pub fn swap_exact_out(ctx: &mut Context<SwapExactOut>, p: Payload) -> Result<()> {
+    pub fn swap_exact_out(ctx: &mut Context<SwapExactOut>, p: FixedPayload<17>) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::swap(
             ctx.program_id,
@@ -160,11 +166,11 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 5]
-    pub fn graduate(ctx: &mut Context<Graduate>, p: Payload) -> Result<()> {
+    pub fn graduate(ctx: &mut Context<Graduate>, p: FixedPayload<0>) -> Result<()> {
         handlers::graduate(ctx, &p.0)
     }
     #[discrim = 6]
-    pub fn add_liquidity(ctx: &mut Context<AddLiquidity>, p: Payload) -> Result<()> {
+    pub fn add_liquidity(ctx: &mut Context<AddLiquidity>, p: FixedPayload<24>) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::liquidity(
             ctx.program_id,
@@ -189,7 +195,7 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 7]
-    pub fn remove_liquidity(ctx: &mut Context<RemoveLiquidity>, p: Payload) -> Result<()> {
+    pub fn remove_liquidity(ctx: &mut Context<RemoveLiquidity>, p: FixedPayload<24>) -> Result<()> {
         check(ctx.remaining_accounts()?.is_empty(), 3)?;
         handlers::liquidity(
             ctx.program_id,
@@ -214,35 +220,44 @@ pub mod fossa_dex {
         )
     }
     #[discrim = 8]
-    pub fn collect_fees(ctx: &mut Context<CollectFees>, p: Payload) -> Result<()> {
+    pub fn collect_fees(ctx: &mut Context<CollectFees>, p: FixedPayload<17>) -> Result<()> {
         handlers::collect(ctx, &p.0)
     }
     #[discrim = 10]
-    pub fn collect_transfer_tax(ctx: &mut Context<CollectTransferTax>, p: Payload) -> Result<()> {
+    pub fn collect_transfer_tax(
+        ctx: &mut Context<CollectTransferTax>,
+        p: FixedPayload<0>,
+    ) -> Result<()> {
         handlers::collect_tax(ctx, &p.0)
     }
     #[discrim = 11]
-    pub fn create_vesting(ctx: &mut Context<CreateVesting>, p: Payload) -> Result<()> {
+    pub fn create_vesting(ctx: &mut Context<CreateVesting>, p: FixedPayload<24>) -> Result<()> {
         handlers::create_vesting(ctx, &p.0)
     }
     #[discrim = 12]
-    pub fn claim_vesting(ctx: &mut Context<ClaimVesting>, p: Payload) -> Result<()> {
+    pub fn claim_vesting(ctx: &mut Context<ClaimVesting>, p: FixedPayload<8>) -> Result<()> {
         handlers::claim_vesting(ctx, &p.0)
     }
     #[discrim = 13]
-    pub fn update_config(ctx: &mut Context<UpdateConfig>, p: Payload) -> Result<()> {
+    pub fn update_config(ctx: &mut Context<UpdateConfig>, p: FixedPayload<1>) -> Result<()> {
         handlers::update_config(ctx, &p.0)
     }
     #[discrim = 14]
-    pub fn initialize_global(ctx: &mut Context<InitializeGlobal>, p: Payload) -> Result<()> {
+    pub fn initialize_global(
+        ctx: &mut Context<InitializeGlobal>,
+        p: FixedPayload<64>,
+    ) -> Result<()> {
         handlers::initialize_global(ctx, &p.0)
     }
     #[discrim = 15]
-    pub fn update_global(ctx: &mut Context<UpdateGlobal>, p: Payload) -> Result<()> {
+    pub fn update_global(ctx: &mut Context<UpdateGlobal>, p: FixedPayload<64>) -> Result<()> {
         handlers::update_global(ctx, &p.0)
     }
     #[discrim = 16]
-    pub fn update_recipients(ctx: &mut Context<UpdateRecipients>, p: Payload) -> Result<()> {
+    pub fn update_recipients(
+        ctx: &mut Context<UpdateRecipients>,
+        p: FixedPayload<0>,
+    ) -> Result<()> {
         handlers::update_recipients(ctx, &p.0)
     }
 }

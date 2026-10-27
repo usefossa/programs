@@ -1,3 +1,4 @@
+use crate::cross_program::{invoke_token, invoke_transfer_fee};
 use crate::{
     abi::*,
     helpers::{addr, err, rd16, rd64, require},
@@ -8,6 +9,9 @@ use anchor_lang::prelude::*;
 use anchor_lang::prelude::{AccountView, Address, ProgramResult};
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_spl::{token_2022_extensions as fees, token_interface as spl};
+use spl::spl_token_2022::{
+    extension::transfer_fee::instruction::TransferFeeInstruction, instruction::TokenInstruction,
+};
 
 fn mint_state(mint: &AccountView, mo: &AccountView) -> ProgramResult {
     require(mint.owner() == &TOKEN_2022 && mint.data_len() == 278, 2)?;
@@ -148,45 +152,59 @@ pub(crate) fn activate(
     let mint_bump = [mint_bump];
     let mint_seeds: &[&[u8]] = &[b"reserve_mint", mo.address().as_ref(), &mint_bump];
     initialize_pda(mint, payer, &TOKEN_2022, 278, mint_seeds)?;
-    fees::transfer_fee_initialize(
+    invoke_transfer_fee(
         CpiContext::new(
             &TOKEN_2022,
             fees::TransferFeeInitialize {
                 mint: mint.try_to_cpi_handle_mut()?,
             },
         ),
-        Some(mo.address()),
-        Some(mo.address()),
-        rd16(p, 9),
-        rd64(p, 11),
+        TransferFeeInstruction::InitializeTransferFeeConfig {
+            transfer_fee_config_authority: Some(*mo.address()).into(),
+            withdraw_withheld_authority: Some(*mo.address()).into(),
+            transfer_fee_basis_points: rd16(p, 9),
+            maximum_fee: rd64(p, 11),
+        },
     )?;
-    spl::initialize_mint2(
+    invoke_token(
         CpiContext::new(
             &TOKEN_2022,
             spl::InitializeMint2 {
                 mint: mint.try_to_cpi_handle_mut()?,
             },
         ),
-        p[8],
-        mo.address(),
-        None,
+        TokenInstruction::InitializeMint2 {
+            decimals: p[8],
+            mint_authority: *mo.address(),
+            freeze_authority: None.into(),
+        },
     )?;
-    spl::initialize_account3(CpiContext::new(
-        &anchor_spl::token::ID,
-        spl::InitializeAccount3 {
-            account: backing.try_to_cpi_handle_mut()?,
-            mint: quote.to_cpi_handle(),
-            authority: mo.to_cpi_handle(),
+    invoke_token(
+        CpiContext::new(
+            &anchor_spl::token::ID,
+            spl::InitializeAccount3 {
+                account: backing.try_to_cpi_handle_mut()?,
+                mint: quote.to_cpi_handle(),
+                authority: mo.to_cpi_handle(),
+            },
+        ),
+        TokenInstruction::InitializeAccount3 {
+            owner: *mo.address(),
         },
-    ))?;
-    spl::initialize_account3(CpiContext::new(
-        &TOKEN_2022,
-        spl::InitializeAccount3 {
-            account: allocation.try_to_cpi_handle_mut()?,
-            mint: mint.to_cpi_handle(),
-            authority: curve_payer.to_cpi_handle(),
+    )?;
+    invoke_token(
+        CpiContext::new(
+            &TOKEN_2022,
+            spl::InitializeAccount3 {
+                account: allocation.try_to_cpi_handle_mut()?,
+                mint: mint.to_cpi_handle(),
+                authority: curve_payer.to_cpi_handle(),
+            },
+        ),
+        TokenInstruction::InitializeAccount3 {
+            owner: *curve_payer.address(),
         },
-    ))?;
+    )?;
     require(
         curve_base_vault.owner() == &TOKEN_2022
             && curve_base_vault.data_len() == 178
@@ -194,15 +212,20 @@ pub(crate) fn activate(
         2,
     )?;
     let mut base_vault = *curve_base_vault;
-    spl::initialize_account3(CpiContext::new(
-        &TOKEN_2022,
-        spl::InitializeAccount3 {
-            account: base_vault.try_to_cpi_handle_mut()?,
-            mint: mint.to_cpi_handle(),
-            authority: curve_authority.to_cpi_handle(),
+    invoke_token(
+        CpiContext::new(
+            &TOKEN_2022,
+            spl::InitializeAccount3 {
+                account: base_vault.try_to_cpi_handle_mut()?,
+                mint: mint.to_cpi_handle(),
+                authority: curve_authority.to_cpi_handle(),
+            },
+        ),
+        TokenInstruction::InitializeAccount3 {
+            owner: *curve_authority.address(),
         },
-    ))?;
-    spl::mint_to_checked(
+    )?;
+    invoke_token(
         CpiContext::new_with_signer(
             &TOKEN_2022,
             spl::MintToChecked {
@@ -212,8 +235,10 @@ pub(crate) fn activate(
             },
             &[model_seeds],
         ),
-        rd64(p, 0),
-        p[8],
+        TokenInstruction::MintToChecked {
+            amount: rd64(p, 0),
+            decimals: p[8],
+        },
     )?;
     crate::cross_program::revoke_mint(mint, mo, &TOKEN_2022, &[model_seeds])?;
     let mut launch = [0u8; 41];
@@ -310,7 +335,7 @@ pub(crate) fn configure(
     let bump = [d[140]];
     let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
     drop(d);
-    fees::transfer_fee_set(
+    invoke_transfer_fee(
         CpiContext::new_with_signer(
             &TOKEN_2022,
             fees::TransferFeeSetTransferFee {
@@ -319,8 +344,10 @@ pub(crate) fn configure(
             },
             &[signer],
         ),
-        rd16(p, 1),
-        rd64(p, 3),
+        TransferFeeInstruction::SetTransferFee {
+            transfer_fee_basis_points: rd16(p, 1),
+            maximum_fee: rd64(p, 3),
+        },
     )?;
     mo.try_borrow_mut()?[141] = p[0];
     Ok(())
@@ -366,7 +393,7 @@ pub(crate) fn redeem(
     let out = (u128::from(available) * u128::from(amount) / u128::from(supply)) as u64;
     require(out > 0 && out >= rd64(p, 8), 8)?;
     let decimals = mint.try_borrow()?[44];
-    spl::burn_checked(
+    invoke_token(
         CpiContext::new(
             &TOKEN_2022,
             spl::BurnChecked {
@@ -375,8 +402,7 @@ pub(crate) fn redeem(
                 authority: holder.to_cpi_handle(),
             },
         ),
-        amount,
-        decimals,
+        TokenInstruction::BurnChecked { amount, decimals },
     )?;
     let bump = [bump];
     let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
@@ -420,15 +446,18 @@ pub(crate) fn collect(
     let bump = [d[140]];
     let signer: &[&[u8]] = &[b"model", m.address().as_ref(), &id, &bump];
     drop(d);
-    fees::withdraw_withheld_tokens_from_mint(CpiContext::new_with_signer(
-        &TOKEN_2022,
-        fees::WithdrawWithheldTokensFromMint {
-            mint: mint.try_to_cpi_handle_mut()?,
-            destination: destination.try_to_cpi_handle_mut()?,
-            authority: mo.to_cpi_handle(),
-        },
-        &[signer],
-    ))
+    invoke_transfer_fee(
+        CpiContext::new_with_signer(
+            &TOKEN_2022,
+            fees::WithdrawWithheldTokensFromMint {
+                mint: mint.try_to_cpi_handle_mut()?,
+                destination: destination.try_to_cpi_handle_mut()?,
+                authority: mo.to_cpi_handle(),
+            },
+            &[signer],
+        ),
+        TransferFeeInstruction::WithdrawWithheldTokensFromMint,
+    )
 }
 
 pub(crate) fn sweep_empty(

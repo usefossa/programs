@@ -1,10 +1,10 @@
 [package]
 name = "inference-router-program"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib"]
 
 [features]
 default = ["no-log-ix-name"]
@@ -16,3 +16,7 @@ legacy-migration = []
 [dependencies]
 anchor-lang = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
 anchor-spl = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

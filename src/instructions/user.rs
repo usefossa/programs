@@ -77,7 +77,7 @@ pub(crate) fn deposit(
     } else {
         accounts.owner.to_cpi_handle()
     };
-    anchor_spl::token::transfer_checked(
+    crate::cross_program::invoke_token(
         CpiContext::new(
             &anchor_spl::token::ID,
             anchor_spl::token::TransferChecked {
@@ -87,8 +87,10 @@ pub(crate) fn deposit(
                 authority,
             },
         ),
-        amount,
-        6,
+        anchor_spl::token_2022::spl_token_2022::instruction::TokenInstruction::TransferChecked {
+            amount,
+            decimals: 6,
+        },
     )?;
     accounts.u.free = balance.into();
     Ok(())

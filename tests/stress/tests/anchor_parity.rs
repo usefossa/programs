@@ -246,6 +246,127 @@ fn router_self_owned_user_withdraw() {
     self_owned_user_transfer(10);
 }
 
+fn registered_model(market: Address) -> (Address, Vec<u8>) {
+    let id = [7; 32];
+    let (model, bump) = Address::find_program_address(&[b"model", market.as_ref(), &id], &ROUTER);
+    let mut data = vec![0; 144];
+    data[..8].copy_from_slice(b"MODELV20");
+    data[8..40].copy_from_slice(market.as_ref());
+    data[40..72].copy_from_slice(&id);
+    data[136..140].copy_from_slice(&1u32.to_le_bytes());
+    data[140] = bump;
+    (model, data)
+}
+
+#[test]
+#[ignore = "requires FOSSA_PARITY_ORIGINAL pointing to freshly built original programs"]
+fn router_offer_update_preserves_rate_boundaries() {
+    let provider = Keypair::new();
+    let m = key();
+    let terms = key();
+    let (model, mut model_data) = registered_model(m);
+    model_data[72..104].copy_from_slice(terms.as_ref());
+    let mut book = vec![0; 168];
+    book[..8].copy_from_slice(b"TERMSV20");
+    book[8..40].copy_from_slice(model.as_ref());
+    book[40..44].copy_from_slice(&1u32.to_le_bytes());
+    book[44..48].copy_from_slice(&1u32.to_le_bytes());
+    book[48..80].copy_from_slice(provider.pubkey().as_ref());
+    for (rate, cached, speed, active, capacity) in [
+        (1u32, 0u32, 1u16, 0u8, 1u32),
+        (u32::MAX, u32::MAX, u16::MAX, 1, u32::MAX),
+    ] {
+        let mut payload = vec![5];
+        for value in [0, rate, cached, rate] {
+            payload.extend(value.to_le_bytes());
+        }
+        payload.extend(speed.to_le_bytes());
+        payload.extend([1, active]);
+        payload.extend(capacity.to_le_bytes());
+        compare(
+            ROUTER,
+            payload,
+            vec![
+                meta(m, false, false),
+                meta(model, false, false),
+                meta(terms, true, false),
+                meta(provider.pubkey(), false, true),
+            ],
+            &[&provider],
+            vec![
+                (m, ROUTER, market(key(), key())),
+                (model, ROUTER, model_data.clone()),
+                (terms, ROUTER, book.clone()),
+            ],
+        );
+    }
+}
+
+fn metadata_update(op: u8) {
+    let provider = Keypair::new();
+    let m = key();
+    let (model, model_data) = registered_model(m);
+    let (metadata, bump, mut data, hash, uri) = if op == 21 {
+        let (profile, bump) = Address::find_program_address(
+            &[b"provider", m.as_ref(), provider.pubkey().as_ref()],
+            &ROUTER,
+        );
+        let mut data = vec![0; 364];
+        data[..8].copy_from_slice(b"PROV0V20");
+        data[40..72].copy_from_slice(provider.pubkey().as_ref());
+        (profile, bump, data, 72, 108)
+    } else {
+        let (metadata, bump) =
+            Address::find_program_address(&[b"model_metadata", model.as_ref()], &ROUTER);
+        let mut data = vec![0; 396];
+        data[..8].copy_from_slice(b"MMETAV20");
+        data[40..72].copy_from_slice(model.as_ref());
+        data[72..104].copy_from_slice(provider.pubkey().as_ref());
+        (metadata, bump, data, 104, 140)
+    };
+    data[8..40].copy_from_slice(m.as_ref());
+    data[hash..hash + 32].fill(1);
+    data[hash + 32..hash + 34].copy_from_slice(&256u16.to_le_bytes());
+    data[if op == 21 { 107 } else { 138 }] = bump;
+    data[uri..].fill(b'x');
+    let mut accounts = vec![meta(m, false, false)];
+    if op == 22 {
+        accounts.push(meta(model, false, false));
+    }
+    accounts.extend([
+        meta(metadata, true, false),
+        meta(provider.pubkey(), false, true),
+    ]);
+    for uri in [b"z".to_vec(), "é".repeat(128).into_bytes()] {
+        let mut payload = vec![op];
+        payload.extend([7; 32]);
+        payload.extend(uri);
+        compare(
+            ROUTER,
+            payload,
+            accounts.clone(),
+            &[&provider],
+            vec![
+                (m, ROUTER, market(key(), key())),
+                (model, ROUTER, model_data.clone()),
+                (metadata, ROUTER, data.clone()),
+            ],
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires FOSSA_PARITY_ORIGINAL pointing to freshly built original programs"]
+fn router_profile_update_preserves_uri_boundaries() {
+    metadata_update(21);
+}
+
+#[test]
+#[ignore = "requires FOSSA_PARITY_ORIGINAL pointing to freshly built original programs"]
+fn router_model_metadata_update_preserves_uri_boundaries() {
+    metadata_update(22);
+}
+
 #[test]
 #[ignore = "requires FOSSA_PARITY_ORIGINAL pointing to freshly built original programs"]
 fn router_list_can_be_its_authority() {

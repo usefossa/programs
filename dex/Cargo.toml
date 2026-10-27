@@ -1,11 +1,11 @@
 [package]
 name = "fossa-dex"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib"]
 
 [features]
 default = ["no-log-ix-name"]
@@ -18,6 +18,6 @@ anchor-spl = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882a
 
 [profile.release]
 overflow-checks = true
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 

@@ -1,8 +1,31 @@
 #![allow(dead_code)]
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_2022::spl_token_2022::instruction::AuthorityType;
+use anchor_spl::token_2022::spl_token_2022::extension::transfer_fee::instruction::TransferFeeInstruction;
+use anchor_spl::token_2022::spl_token_2022::instruction::{AuthorityType, TokenInstruction};
 use anchor_spl::token_interface as token;
+
+// fixed token account structs already define canonical metas; invoke validates them once.
+pub fn invoke_token<'a, T: anchor_lang::ToCpiAccounts<'a>>(
+    ctx: CpiContext<'a, T>,
+    instruction: TokenInstruction,
+) -> ProgramResult {
+    require!(
+        ctx.program == &anchor_spl::token::ID || ctx.program == &token::ID,
+        ProgramError::IncorrectProgramId
+    );
+    ctx.invoke(&instruction.pack())
+}
+
+pub fn invoke_transfer_fee<'a, T: anchor_lang::ToCpiAccounts<'a>>(
+    ctx: CpiContext<'a, T>,
+    instruction: TransferFeeInstruction,
+) -> ProgramResult {
+    require!(ctx.program == &token::ID, ProgramError::IncorrectProgramId);
+    let mut data = TokenInstruction::TransferFeeExtension.pack();
+    instruction.pack(&mut data);
+    ctx.invoke(&data)
+}
 
 pub fn transfer_checked(
     from: &AccountView,
@@ -15,7 +38,7 @@ pub fn transfer_checked(
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let (mut from, mut to) = (*from, *to);
-    token::transfer_checked(
+    invoke_token(
         CpiContext::new_with_signer(
             program,
             token::TransferChecked {
@@ -26,8 +49,7 @@ pub fn transfer_checked(
             },
             seeds,
         ),
-        amount,
-        decimals,
+        TokenInstruction::TransferChecked { amount, decimals },
     )
 }
 
@@ -40,7 +62,7 @@ pub fn mint_to(
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let (mut mint, mut to) = (*mint, *to);
-    token::mint_to(
+    invoke_token(
         CpiContext::new_with_signer(
             program,
             token::MintTo {
@@ -50,7 +72,7 @@ pub fn mint_to(
             },
             seeds,
         ),
-        amount,
+        TokenInstruction::MintTo { amount },
     )
 }
 
@@ -63,7 +85,7 @@ pub fn burn(
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let (mut from, mut mint) = (*from, *mint);
-    token::burn(
+    invoke_token(
         CpiContext::new_with_signer(
             program,
             token::Burn {
@@ -73,7 +95,7 @@ pub fn burn(
             },
             seeds,
         ),
-        amount,
+        TokenInstruction::Burn { amount },
     )
 }
 
@@ -84,7 +106,7 @@ pub fn revoke_mint(
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let mut mint = *mint;
-    token::set_authority(
+    invoke_token(
         CpiContext::new_with_signer(
             program,
             token::SetAuthority {
@@ -93,8 +115,10 @@ pub fn revoke_mint(
             },
             seeds,
         ),
-        AuthorityType::MintTokens,
-        None,
+        TokenInstruction::SetAuthority {
+            authority_type: AuthorityType::MintTokens,
+            new_authority: None.into(),
+        },
     )
 }
 
@@ -106,15 +130,18 @@ pub fn close_token(
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let (mut account, mut destination) = (*account, *destination);
-    token::close_account(CpiContext::new_with_signer(
-        program,
-        token::CloseAccount {
-            account: account.try_to_cpi_handle_mut()?,
-            destination: destination.try_to_cpi_handle_mut()?,
-            authority: authority.to_cpi_handle(),
-        },
-        seeds,
-    ))
+    invoke_token(
+        CpiContext::new_with_signer(
+            program,
+            token::CloseAccount {
+                account: account.try_to_cpi_handle_mut()?,
+                destination: destination.try_to_cpi_handle_mut()?,
+                authority: authority.to_cpi_handle(),
+            },
+            seeds,
+        ),
+        TokenInstruction::CloseAccount,
+    )
 }
 
 pub fn transfer_lamports(from: &AccountView, to: &AccountView, lamports: u64) -> ProgramResult {

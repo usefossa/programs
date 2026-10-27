@@ -738,7 +738,10 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>, p: &[u8]) -> Re
     let bump = [s.bump];
     let seed: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump];
     let signers = [seed];
-    use anchor_spl::token_2022_extensions as extensions;
+    use anchor_spl::{
+        token_2022::spl_token_2022::extension::transfer_fee::instruction::TransferFeeInstruction,
+        token_2022_extensions as extensions,
+    };
     if !sources.is_empty() {
         for (i, source) in sources.iter().enumerate() {
             check(
@@ -770,15 +773,18 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>, p: &[u8]) -> Re
             source_handles,
         )?;
     }
-    extensions::withdraw_withheld_tokens_from_mint(CpiContext::new_with_signer(
-        token.address(),
-        extensions::WithdrawWithheldTokensFromMint {
-            mint: CpiHandleMut::writable(mint),
-            destination: CpiHandleMut::writable(destination),
-            authority: CpiHandle::readonly(authority),
-        },
-        &signers,
-    ))?;
+    crate::cross_program::invoke_transfer_fee(
+        CpiContext::new_with_signer(
+            token.address(),
+            extensions::WithdrawWithheldTokensFromMint {
+                mint: CpiHandleMut::writable(mint),
+                destination: CpiHandleMut::writable(destination),
+                authority: CpiHandle::readonly(authority),
+            },
+            &signers,
+        ),
+        TransferFeeInstruction::WithdrawWithheldTokensFromMint,
+    )?;
     let collected = sub(token::balance(destination)?, before)?;
     check(collected > 0, 3)?;
     let mut d = pool.try_borrow_mut()?;
