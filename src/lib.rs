@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 
-mod args;
+pub mod args;
 mod helpers;
 mod instructions;
 mod matching;
@@ -8,11 +8,11 @@ mod receipt;
 mod token;
 
 extern crate alloc;
-mod contexts;
-mod state_types;
+pub mod contexts;
+pub mod state_types;
 use anchor_lang::prelude::*;
 use args::*;
-use contexts::*;
+pub use contexts::*;
 pub const ID: Address = Address::new_from_array([8; 32]);
 
 #[error_code]

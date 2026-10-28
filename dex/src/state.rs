@@ -3,11 +3,11 @@ use crate::{
     state_types::Pool,
     token::{self, Mint},
 };
+use anchor_lang::prelude::InterfaceAccount;
 use anchor_lang::prelude::{Account, AccountView, Address};
-use anchor_lang::AnchorAccount;
+use anchor_spl::token_interface::{Mint as SplMint, TokenAccount};
 
-pub fn lp(mint: &AccountView, authority: &Address) -> Result<u64> {
-    let mint = Account::<anchor_spl::token::Mint>::load(*mint)?;
+pub fn lp(mint: &Account<anchor_spl::token::Mint>, authority: &Address) -> Result<u64> {
     check(
         mint.mint_authority() == Some(authority)
             && mint.decimals() == 9
@@ -31,14 +31,13 @@ impl Pool {
     )]
     pub fn validate(
         &self,
-        authority_account: &AccountView,
-        mints: [&AccountView; 2],
-        vaults: [&AccountView; 2],
+        mints: [&InterfaceAccount<SplMint>; 2],
+        vaults: [&InterfaceAccount<TokenAccount>; 2],
         tokens: [&AccountView; 2],
         epoch: u64,
     ) -> Result<[Mint; 2]> {
-        let balance_a = token::account(vaults[0], mints[0], authority_account.address(), true)?;
-        let balance_b = token::account(vaults[1], mints[1], authority_account.address(), true)?;
+        let balance_a = token::account(vaults[0], true)?;
+        let balance_b = token::account(vaults[1], true)?;
         check(
             balance_a
                 >= add(

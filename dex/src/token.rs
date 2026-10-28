@@ -31,16 +31,20 @@ impl Mint {
     }
 }
 
-pub fn mint(account: &AccountView, token: &AccountView, epoch: u64, quote: bool) -> Result<Mint> {
+pub fn mint(
+    mint: &InterfaceAccount<SplMint>,
+    token: &AccountView,
+    epoch: u64,
+    quote: bool,
+) -> Result<Mint> {
     check(
-        token.executable() && account.owner() == token.address(),
+        token.executable() && mint.account().owner() == token.address(),
         crate::DexError::InvalidAccount,
     )?;
     check(
         token.address() == &anchor_spl::token::ID || token.address() == &anchor_spl::token_2022::ID,
         crate::DexError::InvalidAccount,
     )?;
-    let mint = InterfaceAccount::<SplMint>::load(*account)?;
     check(
         quote || (!mint.has_mint_authority() && !mint.has_freeze_authority()),
         crate::DexError::InvalidAccount,
@@ -50,9 +54,9 @@ pub fn mint(account: &AccountView, token: &AccountView, epoch: u64, quote: bool)
         supply: mint.supply(),
         ..Mint::default()
     };
-    if account.owner() == &anchor_spl::token_2022::ID {
-        let data = account.try_borrow()?;
-        let state = PodStateWithExtensions::<PodMint>::unpack(&data)?;
+    if mint.account().owner() == &anchor_spl::token_2022::ID {
+        let data = unsafe { mint.account().borrow_unchecked() };
+        let state = PodStateWithExtensions::<PodMint>::unpack(data)?;
         let extensions = state.get_extension_types()?;
         check(
             extensions.iter().all(|extension| {
@@ -82,18 +86,17 @@ pub fn mint(account: &AccountView, token: &AccountView, epoch: u64, quote: bool)
 }
 
 pub fn curve_mint(
-    account: &AccountView,
+    mint: &InterfaceAccount<SplMint>,
     authority: &Address,
     tax_bps: u16,
     taxed: bool,
 ) -> Result<()> {
-    let mint = InterfaceAccount::<SplMint>::load(*account)?;
     check(
         mint.mint_authority() == Some(authority) && !mint.has_freeze_authority(),
         crate::DexError::InvalidAccount,
     )?;
-    let data = account.try_borrow()?;
-    let state = PodStateWithExtensions::<PodMint>::unpack(&data)?;
+    let data = unsafe { mint.account().borrow_unchecked() };
+    let state = PodStateWithExtensions::<PodMint>::unpack(data)?;
     let has_fee = state
         .get_extension_types()?
         .contains(&ExtensionType::TransferFeeConfig);
@@ -113,30 +116,16 @@ pub fn curve_mint(
     Ok(())
 }
 
-pub fn account(
-    account: &AccountView,
-    mint: &AccountView,
-    owner: &Address,
-    vault: bool,
-) -> Result<u64> {
-    check(
-        account.owner() == mint.owner(),
-        crate::DexError::InvalidAccount,
-    )?;
-    let token = InterfaceAccount::<TokenAccount>::load(*account)?;
-    check(
-        token.mint() == mint.address() && token.owner() == owner,
-        crate::DexError::InvalidAccount,
-    )?;
+pub fn account(account: &InterfaceAccount<TokenAccount>, vault: bool) -> Result<u64> {
     if vault {
         check(
-            !token.has_delegate() && !token.has_close_authority() && !token.is_native(),
+            !account.has_delegate() && !account.has_close_authority() && !account.is_native(),
             crate::DexError::InvalidAccount,
         )?;
     }
-    if account.owner() == &anchor_spl::token_2022::ID {
-        let data = account.try_borrow()?;
-        let state = PodStateWithExtensions::<PodAccount>::unpack(&data)?;
+    if account.account().owner() == &anchor_spl::token_2022::ID {
+        let data = unsafe { account.account().borrow_unchecked() };
+        let state = PodStateWithExtensions::<PodAccount>::unpack(data)?;
         check(
             state.get_extension_types()?.iter().all(|extension| {
                 matches!(
@@ -147,32 +136,27 @@ pub fn account(
             crate::DexError::InvalidAccount,
         )?;
     }
-    Ok(token.amount())
-}
-
-pub fn balance(account: &AccountView) -> Result<u64> {
-    Ok(InterfaceAccount::<TokenAccount>::load(*account)?.amount())
+    Ok(account.amount())
 }
 
 pub fn transfer(
-    from: &AccountView,
-    mint: &AccountView,
-    to: &AccountView,
+    from: &mut InterfaceAccount<TokenAccount>,
+    mint: &InterfaceAccount<SplMint>,
+    to: &mut InterfaceAccount<TokenAccount>,
     owner: &AccountView,
     amount: u64,
     decimals: u8,
     signers: &[&[&[u8]]],
 ) -> Result<u64> {
     check(
-        from.address() != to.address() && from.is_writable() && to.is_writable(),
+        from.address() != to.address(),
         crate::DexError::InvalidAccount,
     )?;
-    let before_from = balance(from)?;
-    let before_to = balance(to)?;
-    let (mut from, mut to) = (*from, *to);
+    let before_from = from.amount();
+    let before_to = to.amount();
     anchor_spl::token_interface::transfer_checked(
         CpiContext::new_with_signer(
-            mint.owner(),
+            mint.account().owner(),
             anchor_spl::token_interface::TransferChecked {
                 from: from.try_to_cpi_handle_mut()?,
                 mint: mint.to_cpi_handle(),
@@ -185,8 +169,8 @@ pub fn transfer(
         decimals,
     )?;
     check(
-        sub(before_from, balance(&from)?)? == amount,
+        sub(before_from, from.amount())? == amount,
         crate::DexError::InvalidAccount,
     )?;
-    sub(balance(&to)?, before_to)
+    sub(to.amount(), before_to)
 }

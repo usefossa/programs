@@ -84,7 +84,8 @@ pub struct Launch {
     )]
     pub lp_mint: Account<anchor_spl::mint::Mint>,
     #[account(
-        mut,
+        init,
+        payer = payer,
         token::mint = lp_mint,
         token::authority = payer
     )]

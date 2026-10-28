@@ -24,7 +24,8 @@ pub struct InitializeUser {
     pub authority: UncheckedAccount,
     #[account(
         token::authority = authority,
-        constraint = vault.mint() == &market.mint @ crate::RouterError::InvalidAccount
+        constraint = vault.mint() == &market.mint @ crate::RouterError::InvalidAccount,
+        constraint = !vault.has_delegate() && !vault.has_close_authority() && !vault.is_native() @ crate::RouterError::InvalidAccount
     )]
     pub vault: Account<anchor_spl::token::TokenAccount>,
     pub system_program: Program<System>,
@@ -63,7 +64,6 @@ pub struct Deposit {
     pub market: Account<Market>,
     #[account(
         mut,
-        constraint = user.account().data_len() == Account::<User>::INIT_SPACE @ crate::RouterError::InvalidAccount,
         constraint = user.owner == *owner.address() @ crate::RouterError::InvalidAccount,
         constraint = user.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
@@ -81,7 +81,8 @@ pub struct Deposit {
         mut,
         address = user.vault @ crate::RouterError::InvalidAccount,
         token::mint = mint,
-        token::authority = authority
+        token::authority = authority,
+        constraint = !vault.has_delegate() && !vault.has_close_authority() && !vault.is_native() @ crate::RouterError::InvalidAccount
     )]
     pub vault: Account<anchor_spl::token::TokenAccount>,
     #[account(address = market.mint @ crate::RouterError::InvalidAccount)]
@@ -177,7 +178,13 @@ pub struct ClaimBooking {
     )]
     pub booking: Account<Booking>,
     pub provider: Signer,
-    #[account(mut, address = user.vault @ crate::RouterError::InvalidAccount, token::mint = mint)]
+    #[account(
+        mut,
+        address = user.vault @ crate::RouterError::InvalidAccount,
+        token::mint = mint,
+        token::authority = authority,
+        constraint = !vault.has_delegate() && !vault.has_close_authority() && !vault.is_native() @ crate::RouterError::InvalidAccount
+    )]
     pub vault: Account<anchor_spl::token::TokenAccount>,
     #[account(mut, token::mint = mint, token::authority = provider)]
     pub payout: Account<anchor_spl::token::TokenAccount>,
@@ -224,7 +231,6 @@ pub struct Withdraw {
     pub market: Account<Market>,
     #[account(
         mut,
-        constraint = user.account().data_len() == Account::<User>::INIT_SPACE @ crate::RouterError::InvalidAccount,
         constraint = user.owner == *owner.address() @ crate::RouterError::InvalidAccount,
         constraint = user.market == *market.address() @ crate::RouterError::InvalidAccount
     )]

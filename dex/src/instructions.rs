@@ -27,7 +27,7 @@ pub(crate) fn initialize_config(
     let token = ctx.accounts.token.account();
     let global = &ctx.accounts.global;
 
-    token::mint(mint, token, Clock::get()?.epoch, true)?;
+    token::mint(&ctx.accounts.mint, token, Clock::get()?.epoch, true)?;
     rates(
         input.rates.trade_bps,
         input.rates.protocol_share,
@@ -146,31 +146,14 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
     let creator_share = config.creator_share.get();
     rates(trade_bps, protocol_share, creator_share)?;
     let epoch = Clock::get()?.epoch;
-    let mint_a_state = token::mint(
-        mint_a.account(),
-        token_a.account(),
-        epoch,
-        curve && !existing,
-    )?;
-    let mint_b_state = token::mint(mint_b.account(), token_b.account(), epoch, true)?;
+    let mint_a_state = token::mint(mint_a, token_a.account(), epoch, curve && !existing)?;
+    let mint_b_state = token::mint(mint_b, token_b.account(), epoch, true)?;
     check(
-        token::account(
-            vault_a.account(),
-            mint_a.account(),
-            authority.address(),
-            true,
-        )? == 0
-            && token::account(
-                vault_b.account(),
-                mint_b.account(),
-                authority.address(),
-                true,
-            )? == 0,
+        token::account(vault_a, true)? == 0 && token::account(vault_b, true)? == 0,
         crate::DexError::InvalidAccount,
     )?;
-    token::account(source_a.account(), mint_a.account(), payer.address(), false)?;
-    token::account(source_b.account(), mint_b.account(), payer.address(), false)?;
-    token::account(user_lp.account(), lp_mint.account(), payer.address(), false)?;
+    token::account(source_a, false)?;
+    token::account(source_b, false)?;
     let bump_ref = [bump];
     let signer_seeds: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump_ref];
     let signers = [signer_seeds];
@@ -184,9 +167,9 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
                 unreachable!()
             };
             token::transfer(
-                source_a.account(),
-                mint_a.account(),
-                vault_a.account(),
+                source_a,
+                mint_a,
+                vault_a,
                 payer.account(),
                 input.supply,
                 mint_a_state.decimals,
@@ -195,7 +178,7 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
         } else {
             check(mint_a_state.supply == 0, crate::DexError::InvalidArgument)?;
             token::curve_mint(
-                mint_a.account(),
+                mint_a,
                 authority.address(),
                 tax_bps,
                 mode == REWARD || mode == COMMUNITY,
@@ -228,10 +211,7 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
                 anchor_spl::token_interface::spl_token_2022::instruction::AuthorityType::MintTokens,
                 None,
             )?;
-            check(
-                token::balance(vault_a.account())? == supply,
-                crate::DexError::InvalidAccount,
-            )?;
+            check(vault_a.amount() == supply, crate::DexError::InvalidAccount)?;
             supply
         };
         let curve_input = match parameters {
@@ -263,18 +243,18 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
             unreachable!()
         };
         let x = token::transfer(
-            source_a.account(),
-            mint_a.account(),
-            vault_a.account(),
+            source_a,
+            mint_a,
+            vault_a,
             payer.account(),
             input.amount_a,
             mint_a_state.decimals,
             &[],
         )?;
         let y = token::transfer(
-            source_b.account(),
-            mint_b.account(),
-            vault_b.account(),
+            source_b,
+            mint_b,
+            vault_b,
             payer.account(),
             input.amount_b,
             mint_b_state.decimals,
@@ -390,14 +370,13 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
     } = accounts;
     let mut pool_state = **pool;
     let [mint_a_state, mint_b_state] = pool_state.validate(
-        authority.account(),
-        [mint_a.account(), mint_b.account()],
-        [vault_a.account(), vault_b.account()],
+        [&*mint_a, &*mint_b],
+        [&*vault_a, &*vault_b],
         [token_a.account(), token_b.account()],
         Clock::get()?.epoch,
     )?;
-    token::account(user_a.account(), mint_a.account(), user.address(), false)?;
-    token::account(user_b.account(), mint_b.account(), user.address(), false)?;
+    token::account(user_a, false)?;
+    token::account(user_b, false)?;
     check(
         pool_state.status == AMM
             || (pool_state.status == CURVE && pool_state.reserve_b < pool_state.target_b),
@@ -407,24 +386,24 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
     let curve = pool_curve(&pool_state);
     let (source, destination, iv, ov, im, om, mi, mo, real_out) = if a_to_b {
         (
-            user_a.account(),
-            user_b.account(),
-            vault_a.account(),
-            vault_b.account(),
-            mint_a.account(),
-            mint_b.account(),
+            user_a,
+            user_b,
+            vault_a,
+            vault_b,
+            &*mint_a,
+            &*mint_b,
             mint_a_state,
             mint_b_state,
             pool_state.reserve_b.get(),
         )
     } else {
         (
-            user_b.account(),
-            user_a.account(),
-            vault_b.account(),
-            vault_a.account(),
-            mint_b.account(),
-            mint_a.account(),
+            user_b,
+            user_a,
+            vault_b,
+            vault_a,
+            &*mint_b,
+            &*mint_a,
             mint_b_state,
             mint_a_state,
             pool_state.reserve_a.get(),
@@ -551,20 +530,16 @@ pub(crate) fn graduate(ctx: &mut Context<Graduate>) -> Result<()> {
     )?;
     let pool = &mut ctx.accounts.pool;
     let authority = ctx.accounts.authority.account();
-    let mut mint_a = *ctx.accounts.mint_a.account();
-    let mint_a = &mut mint_a;
-    let mint_b = ctx.accounts.mint_b.account();
-    let mut vault_a = *ctx.accounts.vault_a.account();
-    let vault_a = &mut vault_a;
-    let mut vault_b = *ctx.accounts.vault_b.account();
-    let vault_b = &mut vault_b;
-    let lp_mint = ctx.accounts.lp_mint.account();
+    let mint_a = &mut ctx.accounts.mint_a;
+    let mint_b = &ctx.accounts.mint_b;
+    let vault_a = &mut ctx.accounts.vault_a;
+    let vault_b = &mut ctx.accounts.vault_b;
+    let lp_mint = &ctx.accounts.lp_mint;
     let token_a = ctx.accounts.token_a.account();
     let token_b = ctx.accounts.token_b.account();
 
     let mut pool_state = **pool;
     pool_state.validate(
-        authority,
         [mint_a, mint_b],
         [vault_a, vault_b],
         [token_a, token_b],
@@ -638,18 +613,16 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
     } = accounts;
     let mut pool_state = **pool;
     let [mint_a_state, mint_b_state] = pool_state.validate(
-        authority.account(),
-        [mint_a.account(), mint_b.account()],
-        [vault_a.account(), vault_b.account()],
+        [&*mint_a, &*mint_b],
+        [&*vault_a, &*vault_b],
         [token_a.account(), token_b.account()],
         Clock::get()?.epoch,
     )?;
     check(pool_state.status == AMM, crate::DexError::Unavailable)?;
-    token::account(user_a.account(), mint_a.account(), user.address(), false)?;
-    token::account(user_b.account(), mint_b.account(), user.address(), false)?;
-    token::account(user_lp.account(), lp_mint.account(), user.address(), false)?;
+    token::account(user_a, false)?;
+    token::account(user_b, false)?;
     let total = add(
-        lp(lp_mint.account(), authority.address())?,
+        lp(lp_mint, authority.address())?,
         pool_state.locked_lp.get(),
     )?;
     let amount = args.amount;
@@ -678,18 +651,18 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
             amount,
         )?;
         let nx = token::transfer(
-            vault_a.account(),
-            mint_a.account(),
-            user_a.account(),
+            vault_a,
+            mint_a,
+            user_a,
             authority.account(),
             x,
             mint_a_state.decimals,
             &signers,
         )?;
         let ny = token::transfer(
-            vault_b.account(),
-            mint_b.account(),
-            user_b.account(),
+            vault_b,
+            mint_b,
+            user_b,
             authority.account(),
             y,
             mint_b_state.decimals,
@@ -706,18 +679,18 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
         let gy = mint_b_state.gross(y)?;
         check(gx <= bound_a && gy <= bound_b, crate::DexError::Slippage)?;
         let nx = token::transfer(
-            user_a.account(),
-            mint_a.account(),
-            vault_a.account(),
+            user_a,
+            mint_a,
+            vault_a,
             user.account(),
             gx,
             mint_a_state.decimals,
             &[],
         )?;
         let ny = token::transfer(
-            user_b.account(),
-            mint_b.account(),
-            vault_b.account(),
+            user_b,
+            mint_b,
+            vault_b,
             user.account(),
             gy,
             mint_b_state.decimals,
@@ -754,22 +727,17 @@ pub(crate) fn collect(ctx: &mut Context<CollectFees>, args: CollectArgs) -> Resu
     let owner = ctx.accounts.owner.account();
     let pool = &mut ctx.accounts.pool;
     let authority = ctx.accounts.authority.account();
-    let mint_a = ctx.accounts.mint_a.account();
-    let mint_b = ctx.accounts.mint_b.account();
-    let mut destination_a = *ctx.accounts.destination_a.account();
-    let destination_a = &mut destination_a;
-    let mut destination_b = *ctx.accounts.destination_b.account();
-    let destination_b = &mut destination_b;
-    let mut vault_a = *ctx.accounts.vault_a.account();
-    let vault_a = &mut vault_a;
-    let mut vault_b = *ctx.accounts.vault_b.account();
-    let vault_b = &mut vault_b;
+    let mint_a = &ctx.accounts.mint_a;
+    let mint_b = &ctx.accounts.mint_b;
+    let destination_a = &mut ctx.accounts.destination_a;
+    let destination_b = &mut ctx.accounts.destination_b;
+    let vault_a = &mut ctx.accounts.vault_a;
+    let vault_b = &mut ctx.accounts.vault_b;
     let token_a = ctx.accounts.token_a.account();
     let token_b = ctx.accounts.token_b.account();
 
     let mut pool_state = **pool;
     let [mint_a_state, mint_b_state] = pool_state.validate(
-        authority,
         [mint_a, mint_b],
         [vault_a, vault_b],
         [token_a, token_b],
@@ -784,8 +752,8 @@ pub(crate) fn collect(ctx: &mut Context<CollectFees>, args: CollectArgs) -> Resu
         } == *owner.address(),
         crate::DexError::Unauthorized,
     )?;
-    token::account(destination_a, mint_a, owner.address(), false)?;
-    token::account(destination_b, mint_b, owner.address(), false)?;
+    token::account(destination_a, false)?;
+    token::account(destination_b, false)?;
     let (x, y) = if protocol {
         (pool_state.protocol_a.get(), pool_state.protocol_b.get())
     } else {
@@ -840,18 +808,14 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>) -> Result<()> {
     let mut extra = ctx.remaining_accounts()?;
     let pool = &mut ctx.accounts.pool;
     let authority = ctx.accounts.authority.account();
-    let mut mint = *ctx.accounts.mint.account();
-    let mint = &mut mint;
-    let mut destination = *ctx.accounts.destination.account();
-    let destination = &mut destination;
+    let mint = &mut ctx.accounts.mint;
+    let destination = &mut ctx.accounts.destination;
     let token = ctx.accounts.token.account();
 
     use anchor_lang::prelude::Clock;
     use anchor_lang::solana_program::sysvar::Sysvar as _;
     check(extra.len() <= 16, crate::DexError::InvalidArgument)?;
     let sources = extra.as_mut_slice();
-    let (mut mint_view, mut destination_view) = (*mint, *destination);
-    let (mint, destination) = (&mut mint_view, &mut destination_view);
     let pool_state = **pool;
     check(
         matches!(pool_state.mode, REWARD | COMMUNITY),
@@ -862,8 +826,8 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>) -> Result<()> {
         mint_state.fee_bps == pool_state.tax_bps.get() && mint_state.fee_cap == u64::MAX,
         crate::DexError::InvalidAccount,
     )?;
-    token::account(destination, mint, &pool_state.distributor, false)?;
-    let before = token::balance(destination)?;
+    token::account(destination, false)?;
+    let before = destination.amount();
     let bump = [pool_state.bump];
     let seed: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump];
     let signers = [seed];
@@ -895,8 +859,8 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>) -> Result<()> {
             CpiContext::new_with_signer(
                 token.address(),
                 extensions::WithdrawWithheldTokensFromAccounts {
-                    mint: CpiHandle::readonly(mint),
-                    destination: CpiHandleMut::writable(destination),
+                    mint: mint.to_cpi_handle(),
+                    destination: destination.try_to_cpi_handle_mut()?,
                     authority: CpiHandle::readonly(authority),
                 },
                 &signers,
@@ -907,13 +871,13 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>) -> Result<()> {
     extensions::withdraw_withheld_tokens_from_mint(CpiContext::new_with_signer(
         token.address(),
         extensions::WithdrawWithheldTokensFromMint {
-            mint: CpiHandleMut::writable(mint),
-            destination: CpiHandleMut::writable(destination),
+            mint: mint.try_to_cpi_handle_mut()?,
+            destination: destination.try_to_cpi_handle_mut()?,
             authority: CpiHandle::readonly(authority),
         },
         &signers,
     ))?;
-    let collected = sub(token::balance(destination)?, before)?;
+    let collected = sub(destination.amount(), before)?;
     check(collected > 0, crate::DexError::InvalidArgument)?;
     pool.tax_collected = pool
         .tax_collected
@@ -929,9 +893,9 @@ pub(crate) fn create_vesting(ctx: &mut Context<CreateVesting>, args: VestingArgs
         ctx.remaining_accounts()?.is_empty(),
         crate::DexError::InvalidArgument,
     )?;
+    let beneficiary = ctx.accounts.beneficiary.account();
     let pool = &mut ctx.accounts.pool;
     let vesting = &mut ctx.accounts.vesting;
-    let beneficiary = ctx.accounts.beneficiary.account();
 
     let mut pool_state = **pool;
     check(
@@ -977,16 +941,12 @@ pub(crate) fn claim_vesting(ctx: &mut Context<ClaimVesting>, minimum_output: u64
         ctx.remaining_accounts()?.is_empty(),
         crate::DexError::InvalidArgument,
     )?;
-    let beneficiary = ctx.accounts.beneficiary.account();
     let pool = &mut ctx.accounts.pool;
     let vesting = &mut ctx.accounts.vesting;
     let authority = ctx.accounts.authority.account();
-    let mut mint = *ctx.accounts.mint.account();
-    let mint = &mut mint;
-    let mut vault = *ctx.accounts.vault.account();
-    let vault = &mut vault;
-    let mut destination = *ctx.accounts.destination.account();
-    let destination = &mut destination;
+    let mint = &ctx.accounts.mint;
+    let vault = &mut ctx.accounts.vault;
+    let destination = &mut ctx.accounts.destination;
     let token = ctx.accounts.token.account();
 
     let pool_state = **pool;
@@ -1007,8 +967,8 @@ pub(crate) fn claim_vesting(ctx: &mut Context<ClaimVesting>, minimum_output: u64
     check(amount > 0, crate::DexError::InvalidArgument)?;
     let remaining = sub(pool_state.vested_base.get(), amount)?;
     let mint_state = token::mint(mint, token, clock.epoch, false)?;
-    token::account(vault, mint, authority.address(), true)?;
-    token::account(destination, mint, beneficiary.address(), false)?;
+    token::account(vault, true)?;
+    token::account(destination, false)?;
     let bump = [pool_state.bump];
     let seed: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump];
     let net = token::transfer(
@@ -1072,7 +1032,7 @@ pub(crate) fn update_config(ctx: &mut Context<UpdateConfig>, enabled: bool) -> R
     )?;
     let accounts = &mut ctx.accounts;
     token::mint(
-        accounts.mint.account(),
+        &accounts.mint,
         accounts.token.account(),
         Clock::get()?.epoch,
         true,

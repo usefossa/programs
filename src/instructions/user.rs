@@ -1,6 +1,6 @@
 use crate::{
     helpers::{add, require, sub},
-    token::{user_transfer, vault_owned_by},
+    token::user_transfer,
 };
 use anchor_lang::prelude::ProgramResult;
 use anchor_lang::{AnchorAccount, CpiContext, ToCpiHandle, ToCpiHandleMut};
@@ -15,11 +15,9 @@ pub(crate) fn initialize(
     )?;
     let accounts = &mut ctx.accounts;
     let owner = accounts.owner.account();
-    let vault = accounts.vault.account();
-    vault_owned_by(vault, &accounts.market.mint, accounts.authority.address())?;
     accounts.user.owner = *owner.address();
     accounts.user.market = *accounts.market.address();
-    accounts.user.vault = *vault.address();
+    accounts.user.vault = *accounts.vault.address();
     accounts.user.bump = ctx.bumps.authority;
     Ok(())
 }
@@ -34,11 +32,6 @@ pub(crate) fn deposit(
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    vault_owned_by(
-        accounts.vault.account(),
-        accounts.mint.address(),
-        accounts.authority.address(),
-    )?;
     require(amount > 0, crate::RouterError::InvalidArgument)?;
     let balance = add(accounts.user.free.get(), amount)?;
     let authority = if accounts.user.address() == accounts.owner.address() {
@@ -73,11 +66,6 @@ pub(crate) fn withdraw(
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    vault_owned_by(
-        accounts.vault.account(),
-        accounts.mint.address(),
-        accounts.authority.address(),
-    )?;
     require(amount > 0, crate::RouterError::InvalidArgument)?;
     let balance = sub(accounts.user.free.get(), amount)?;
     user_transfer(
