@@ -1,21 +1,22 @@
 [package]
 name = "inference-router-program"
-version = "0.13.1"
+version = "0.14.1"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [features]
 default = ["no-log-ix-name"]
 no-log-ix-name = []
 no-entrypoint = []
 local-test = []
-legacy-migration = []
 
 [dependencies]
 anchor-lang = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
 anchor-spl = { git = "https://github.com/otter-sec/anchor", rev = "a20660219882af5f199d56ea3f9326f387f89d8b" }
+bytemuck = { version = "1", features = ["derive"] }
+fossa-dex = { path = "dex", features = ["cpi"] }
 
 [profile.release]
 lto = "thin"

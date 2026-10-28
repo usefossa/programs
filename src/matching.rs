@@ -1,47 +1,26 @@
 use crate::{
-    abi::{CAPACITY_LEN, HEADER_LEN, MAX_ENTRIES, TERMS_LEN},
-    helpers::{err, fee, rd16, rd32, rd64, require},
+    args::ReserveRequest,
+    helpers::{fee, require},
+    state_types::{CapacityEntry, TermsEntry, MAX_ENTRIES},
     CLAIM_SECONDS,
 };
-use anchor_lang::prelude::ProgramError;
+use anchor_lang::prelude::{Address, ProgramError};
 
-pub(crate) struct Request {
-    caps: [u32; 3],
-    min_speed: u16,
-    private: bool,
-    cache_provider: [u8; 32],
-    pub(crate) max_input: u32,
-    pub(crate) max_output: u32,
-    estimated_input: u32,
-    estimated_cached: u32,
-    estimated_output: u32,
-    pub(crate) spend: u64,
-}
-impl Request {
-    pub(crate) fn parse(p: &[u8], free: u64) -> Result<Self, ProgramError> {
-        require(p.len() == 107 && p[54] <= 1, 3)?;
-        let r = Self {
-            caps: [rd32(p, 32), rd32(p, 36), rd32(p, 40)],
-            min_speed: rd16(p, 44),
-            private: p[54] == 1,
-            cache_provider: p[75..107].try_into().unwrap(),
-            max_input: rd32(p, 46),
-            max_output: rd32(p, 50),
-            estimated_input: rd32(p, 63),
-            estimated_cached: rd32(p, 67),
-            estimated_output: rd32(p, 71),
-            spend: free.min(rd64(p, 55)),
-        };
+impl ReserveRequest {
+    pub(crate) fn validate(&self, free: u64) -> Result<Self, ProgramError> {
+        let mut request = *self;
         require(
-            r.max_input > 0
-                && r.max_output > 0
-                && r.estimated_input <= r.max_input
-                && r.estimated_output <= r.max_output
-                && r.estimated_cached <= r.estimated_input
-                && (r.estimated_cached == 0 || p[75..107] != [0; 32]),
-            3,
+            request.max_input > 0
+                && request.max_output > 0
+                && request.estimated_input <= request.max_input
+                && request.estimated_output <= request.max_output
+                && request.estimated_cached <= request.estimated_input
+                && (request.estimated_cached == 0
+                    || request.cache_provider != anchor_lang::prelude::Address::default()),
+            crate::RouterError::InvalidArgument,
         )?;
-        Ok(r)
+        request.spend = free.min(request.spend);
+        Ok(request)
     }
 }
 #[derive(Debug, PartialEq)]
@@ -52,76 +31,44 @@ pub(crate) struct Match {
     pub(crate) cache: bool,
 }
 pub(crate) fn select(
-    terms: &[u8],
-    capacity: &[u8],
-    providers: &[u8],
-    r: &Request,
+    terms: &[TermsEntry],
+    capacity: &[CapacityEntry],
+    providers: &[Address],
+    r: &ReserveRequest,
 ) -> Result<Match, ProgramError> {
-    let count = rd32(terms, 44) as usize;
+    let count = terms.len();
     require(
-        count <= MAX_ENTRIES && count == rd32(capacity, 44) as usize,
-        2,
+        count <= MAX_ENTRIES && count == capacity.len(),
+        crate::RouterError::InvalidAccount,
     )?;
-    let terms = terms
-        .get(HEADER_LEN..HEADER_LEN + count * TERMS_LEN)
-        .ok_or(err(2))?;
-    let capacity = capacity
-        .get(HEADER_LEN..HEADER_LEN + count * CAPACITY_LEN)
-        .ok_or(err(2))?;
-    // runtime account data and fixed entries are eight-byte aligned; validate before word reads.
-    require(
-        (terms.as_ptr() as usize | capacity.as_ptr() as usize | providers.as_ptr() as usize) & 7
-            == 0,
-        2,
-    )?;
-    let members = crate::instructions::list::Members::new(providers);
     // ceil(output / speed) must fit the claim window; compute required speed once.
     let min_speed =
         u32::from(r.min_speed).max(r.max_output.div_ceil((86_400 - CLAIM_SECONDS) as u32));
-    let cache_words: [u64; 4] = core::array::from_fn(|i| rd64(&r.cache_provider, i * 8));
-    let cache_member = r.estimated_cached > 0
-        && members.contains(unsafe {
-            core::slice::from_raw_parts(cache_words.as_ptr().cast::<u8>(), 32)
-        });
+    let cache_member = r.estimated_cached > 0 && providers.binary_search(&r.cache_provider).is_ok();
     let mut best = Match {
         slot: 0,
         reserve: 0,
         score: u64::MAX,
         cache: false,
     };
-    for (slot, (t, c)) in terms
-        .chunks_exact(TERMS_LEN)
-        .zip(capacity.chunks_exact(CAPACITY_LEN))
-        .enumerate()
-    {
-        let provider = &t[..32];
-        // both complete entries contain integer bytes only; alignment and lengths were checked above.
-        let words = unsafe { &*t.as_ptr().cast::<[u64; 15]>() };
-        let state = unsafe { &*c.as_ptr().cast::<[u64; 4]>() };
-        let input = words[12] as u32;
-        let cached = (words[12] >> 32) as u32;
-        let output = words[13] as u32;
-        let speed = (words[13] >> 32) as u16;
-        let privacy = (words[13] >> 48) as u8;
-        let active = (words[13] >> 56) as u8;
-        if active != 1
-            || (r.private && privacy != 1)
-            || u32::from(speed) < min_speed
-            || state[2] as u32 >= (words[14] >> 32) as u32
-            || input > r.caps[0]
-            || cached > r.caps[1]
-            || output > r.caps[2]
+    for (slot, (t, c)) in terms.iter().zip(capacity).enumerate() {
+        let input = t.input_rate.get();
+        let cached_rate = t.cached_rate.get();
+        let output = t.output_rate.get();
+        if t.active != 1
+            || (r.private && t.privacy != 1)
+            || u32::from(t.speed.get()) < min_speed
+            || c.active.get() >= t.capacity.get()
+            || input > r.input_rate_cap
+            || cached_rate > r.cached_rate_cap
+            || output > r.output_rate_cap
         {
             continue;
         }
-        let cached = r.estimated_cached > 0
-            && words[3] == cache_words[3]
-            && words[2] == cache_words[2]
-            && words[1] == cache_words[1]
-            && words[0] == cache_words[0];
+        let cached = r.estimated_cached > 0 && t.provider == r.cache_provider;
         let score = if cached {
             fee(r.estimated_input - r.estimated_cached, input)
-                + fee(r.estimated_cached, (words[12] >> 32) as u32)
+                + fee(r.estimated_cached, cached_rate)
         } else {
             fee(r.estimated_input, input)
         } + fee(r.estimated_output, output);
@@ -132,7 +79,7 @@ pub(crate) fn select(
         if !(if cached {
             cache_member
         } else {
-            members.contains(provider)
+            providers.binary_search(&t.provider).is_ok()
         }) {
             continue;
         }
@@ -150,8 +97,73 @@ pub(crate) fn select(
             break;
         }
     }
-    require(best.score != u64::MAX, 6)?;
-    let at = best.slot as usize * TERMS_LEN;
-    best.cache = terms[at..at + 32] == r.cache_provider;
+    require(best.score != u64::MAX, crate::RouterError::Unavailable)?;
+    best.cache = terms[best.slot as usize].provider == r.cache_provider;
     Ok(best)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terms(provider: Address, input_rate: u32) -> TermsEntry {
+        TermsEntry {
+            provider,
+            payout: Address::new_from_array([9; 32]),
+            reserved: [0; 32],
+            input_rate: input_rate.into(),
+            cached_rate: input_rate.into(),
+            output_rate: input_rate.into(),
+            speed: 100.into(),
+            privacy: 1,
+            active: 1,
+            reserved2: [0; 4],
+            capacity: 2.into(),
+        }
+    }
+
+    fn capacity(active: u32) -> CapacityEntry {
+        CapacityEntry {
+            reserved: [0; 16],
+            active: active.into(),
+            reserved2: [0; 12],
+        }
+    }
+
+    fn request(cache_provider: Address) -> ReserveRequest {
+        ReserveRequest {
+            model_id: Address::new_from_array([3; 32]),
+            input_rate_cap: 2_000_000,
+            cached_rate_cap: 2_000_000,
+            output_rate_cap: 2_000_000,
+            min_speed: 1,
+            max_input: 100,
+            max_output: 100,
+            private: false,
+            spend: 1_000,
+            estimated_input: 50,
+            estimated_cached: 0,
+            estimated_output: 50,
+            cache_provider,
+        }
+    }
+
+    #[test]
+    fn selects_the_lowest_score_eligible_provider() {
+        let first = Address::new_from_array([1; 32]);
+        let second = Address::new_from_array([2; 32]);
+        let terms = [terms(first, 1_000_000), terms(second, 500_000)];
+        let capacity = [capacity(0), capacity(0)];
+        let result = select(&terms, &capacity, &[first, second], &request(first)).unwrap();
+        assert_eq!(result.slot, 1);
+    }
+
+    #[test]
+    fn rejects_full_or_unlisted_providers() {
+        let first = Address::new_from_array([1; 32]);
+        let second = Address::new_from_array([2; 32]);
+        let terms = [terms(first, 1_000_000), terms(second, 500_000)];
+        let capacity = [capacity(2), capacity(0)];
+        assert!(select(&terms, &capacity, &[first], &request(first)).is_err());
+    }
 }

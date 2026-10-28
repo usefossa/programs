@@ -4,21 +4,31 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, type AccountInfo } from "@solana/web3.js";
 import { loadConfig, loadKeypair, options, type Config } from "./config";
-import { authority, deployed, deployArgs, extension, upgrade, validateElf } from "./upgrade";
+import {
+  ELF_HEADER_CODEC,
+  ELF_PROGRAM_HEADER_CODEC,
+  ELF_SECTION_HEADER_CODEC,
+  LOADER_BUFFER_CODEC,
+  LOADER_PROGRAM_CODEC,
+  LOADER_PROGRAM_DATA_CODEC,
+  type ElfHeader,
+  type ElfProgramHeader,
+  type ElfSectionHeader,
+} from "./formats";
+import { authority, deployed, deployArgs, extension, LOADER, upgrade, validateElf } from "./upgrade";
 
 const directories: string[] = [];
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
 const key = (seed: number) => Keypair.fromSeed(new Uint8Array(32).fill(seed));
 const program = key(1).publicKey, market = key(2).publicKey, provider = key(3).publicKey;
-const loader = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), "fossa-upgrade-")); directories.push(base);
   const config: Config = { base, solana: { rpc_url: "http://rpc.invalid" }, marketplace: { program_id: program.toBase58() }, operator: { keypair: "missing-key.json" } };
   return { base, config };
 }
-function account(magic: string, size: number, owner = program): AccountInfo<Buffer> {
-  const data = Buffer.alloc(size); data.write(magic);
-  return { data, owner, lamports: 1_000_000, executable: false, rentEpoch: 0 };
+type EncodedBytes = ReturnType<typeof LOADER_PROGRAM_CODEC.encode>;
+function account(data: EncodedBytes | Uint8Array | number, owner = program): AccountInfo<Buffer> {
+  return { data: typeof data === "number" ? Buffer.alloc(data) : Buffer.from(data), owner, lamports: 1_000_000, executable: false, rentEpoch: 0 };
 }
 function rpcFixture(accounts: Map<string, AccountInfo<Buffer>>) {
   const calls: string[] = [];
@@ -61,24 +71,58 @@ test.each([null, [], Array(63).fill(0), Array(64).fill(-1), Array(64).fill(256),
   expect(() => loadKeypair(base, "bad.json")).toThrow();
 });
 
-function elf() {
-  const artifact = Buffer.alloc(256); artifact.set([127, 69, 76, 70, 2, 1, 1]);
-  artifact.writeUInt16LE(3, 16); artifact.writeUInt16LE(263, 18); artifact.writeUInt32LE(1, 20);
-  artifact.writeBigUInt64LE(120n, 24); artifact.writeBigUInt64LE(64n, 32); artifact.writeBigUInt64LE(128n, 40);
-  artifact.writeUInt16LE(64, 52); artifact.writeUInt16LE(56, 54); artifact.writeUInt16LE(1, 56);
-  artifact.writeUInt16LE(64, 58); artifact.writeUInt16LE(2, 60);
-  artifact.writeUInt32LE(1, 64); artifact.writeUInt32LE(5, 68);
-  artifact.writeBigUInt64LE(120n, 72); artifact.writeBigUInt64LE(120n, 80);
-  artifact.writeBigUInt64LE(8n, 96); artifact.writeBigUInt64LE(8n, 104); artifact.fill(9, 120, 128);
-  artifact.writeUInt32LE(1, 196); artifact.writeBigUInt64LE(120n, 216); artifact.writeBigUInt64LE(8n, 224);
+const ELF_IDENT: ElfHeader["ident"] = {
+  magic: new Uint8Array([127, 69, 76, 70]), class: 2, endianness: 1,
+  version: 1, osAbi: 0, abiVersion: 0, padding: new Uint8Array(7),
+};
+function elf(options: {
+  header?: Partial<ElfHeader>;
+  program?: Partial<ElfProgramHeader>;
+  section?: Partial<ElfSectionHeader>;
+} = {}) {
+  const header: ElfHeader = {
+    ident: ELF_IDENT,
+    type: 3, machine: 263, version: 1, entry: 120n,
+    programOffset: BigInt(ELF_HEADER_CODEC.fixedSize), sectionOffset: 128n, flags: 0,
+    headerSize: ELF_HEADER_CODEC.fixedSize, programEntrySize: ELF_PROGRAM_HEADER_CODEC.fixedSize,
+    programCount: 1, sectionEntrySize: ELF_SECTION_HEADER_CODEC.fixedSize, sectionCount: 2,
+    sectionNames: 0, ...options.header,
+  };
+  const programHeader: ElfProgramHeader = {
+    type: 1, flags: 5, offset: 120n, virtualAddress: 120n, physicalAddress: 0n,
+    fileSize: 8n, memorySize: 8n, alignment: 0n, ...options.program,
+  };
+  const section: ElfSectionHeader = {
+    name: 0, type: 1, flags: 0n, address: 0n, offset: 120n, size: 8n,
+    link: 0, info: 0, alignment: 0n, entrySize: 0n, ...options.section,
+  };
+  const artifact = Buffer.alloc(256);
+  ELF_HEADER_CODEC.write(header, artifact, 0);
+  ELF_PROGRAM_HEADER_CODEC.write(programHeader, artifact, ELF_HEADER_CODEC.fixedSize);
+  ELF_SECTION_HEADER_CODEC.write(section, artifact, 128 + ELF_SECTION_HEADER_CODEC.fixedSize);
+  artifact.fill(9, 120, 128);
   return artifact;
+}
+function programData(artifact = Buffer.alloc(0), authority = provider, padding = 0, hasAuthority = 1) {
+  return Buffer.concat([
+    Buffer.from(LOADER_PROGRAM_DATA_CODEC.encode({ state: 3, slot: 0n, hasAuthority, authority: authority.toBytes() })),
+    artifact,
+    Buffer.alloc(padding),
+  ]);
+}
+function bufferData(bytes: number, authority = provider, state = 1, hasAuthority = 1) {
+  return Buffer.concat([
+    Buffer.from(LOADER_BUFFER_CODEC.encode({ state, hasAuthority, authority: authority.toBytes() })),
+    Buffer.alloc(bytes),
+  ]);
 }
 function upgradeFixture() {
   const { config, base } = fixture(), artifact = elf(), bytes = artifact.length;
   const path = join(base, "program.so"); writeFileSync(path, artifact);
-  const executable = account("", 36, loader), dataAddress = key(10).publicKey;
-  executable.executable = true; executable.data.writeUInt32LE(2); dataAddress.toBuffer().copy(executable.data, 4);
-  const data = account("", 45 + bytes, loader); data.data.writeUInt32LE(3); data.data[12] = 1; provider.toBuffer().copy(data.data, 13);
+  const dataAddress = key(10).publicKey;
+  const executable = account(LOADER_PROGRAM_CODEC.encode({ state: 2, programData: dataAddress.toBytes() }), LOADER);
+  executable.executable = true;
+  const data = account(programData(Buffer.alloc(bytes)), LOADER);
   const accounts = new Map([[program.toBase58(), executable], [dataAddress.toBase58(), data]]), { rpc } = rpcFixture(accounts);
   return { config, path, rpc, executable, data, artifact, accounts };
 }
@@ -93,31 +137,30 @@ function executionFixture() {
 test("ELF validation checks complete headers, tables, segments, sections, and SBF entry point", () => {
   validateElf(elf());
   for (const bytes of [4, 63, 119, 127, 255]) expect(() => validateElf(elf().subarray(0, bytes))).toThrow("ELF");
-  const mutations = [
-    (a: Buffer) => { a[4] = 1; },
-    (a: Buffer) => a.writeUInt16LE(62, 18),
-    (a: Buffer) => a.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 32),
-    (a: Buffer) => a.writeUInt16LE(0xffff, 56),
-    (a: Buffer) => a.writeUInt16LE(2, 62),
-    (a: Buffer) => a.writeUInt32LE(4, 68),
-    (a: Buffer) => a.writeBigUInt64LE(128n, 24),
-    (a: Buffer) => a.writeBigUInt64LE(1000n, 96),
-    (a: Buffer) => a.writeBigUInt64LE(7n, 104),
-    (a: Buffer) => a.writeBigUInt64LE(1000n, 224),
-    (a: Buffer) => a.writeUInt32LE(2, 232),
+  const invalid = [
+    elf({ header: { ident: { ...ELF_IDENT, class: 1 } } }),
+    elf({ header: { machine: 62 } }),
+    elf({ header: { programOffset: 0xffff_ffff_ffff_ffffn } }),
+    elf({ header: { programCount: 0xffff } }),
+    elf({ header: { sectionNames: 2 } }),
+    elf({ program: { flags: 4 } }),
+    elf({ header: { entry: 128n } }),
+    elf({ program: { fileSize: 1000n } }),
+    elf({ program: { memorySize: 7n } }),
+    elf({ section: { size: 1000n } }),
+    elf({ section: { link: 2 } }),
   ];
-  for (const mutate of mutations) { const artifact = elf(); mutate(artifact); expect(() => validateElf(artifact)).toThrow("ELF"); }
-  const legacy = elf(); legacy.writeUInt16LE(247, 18); validateElf(legacy);
-  const nobits = elf(); nobits.writeUInt32LE(8, 196); nobits.writeBigUInt64LE(1000n, 224); validateElf(nobits);
+  for (const artifact of invalid) expect(() => validateElf(artifact)).toThrow("ELF");
+  validateElf(elf({ section: { type: 8, size: 1000n } }));
 });
 
 test("upgrade inspection validates loader state and rejects immutable or malformed programs", () => {
   const { executable, data } = upgradeFixture();
   expect(deployed(executable)).toBeInstanceOf(PublicKey); expect(authority(data).equals(provider)).toBe(true);
-  for (const value of [null, { ...executable, owner: program }, { ...executable, executable: false }, { ...executable, data: Buffer.alloc(35) }]) expect(() => deployed(value)).toThrow();
-  data.data[12] = 0; expect(() => authority(data)).toThrow("immutable");
-  expect(() => authority({ ...data, data: Buffer.alloc(44) })).toThrow();
-  data.data[12] = 1; expect(() => authority({ ...data, executable: true })).toThrow();
+  for (const value of [null, { ...executable, owner: program }, { ...executable, executable: false }, { ...executable, data: Buffer.alloc(LOADER_PROGRAM_CODEC.fixedSize - 1) }]) expect(() => deployed(value)).toThrow();
+  expect(() => authority({ ...data, data: programData(Buffer.alloc(0), provider, 0, 0) })).toThrow("immutable");
+  expect(() => authority({ ...data, data: Buffer.alloc(LOADER_PROGRAM_DATA_CODEC.fixedSize - 1) })).toThrow();
+  expect(() => authority({ ...data, executable: true })).toThrow();
 });
 
 test.each([[100, 145, 0], [100, 144, 10_240], [100, 200, 0], [20_000, 100, 19_945]])("upgrade growth rounds minimum extension correctly %#", (artifact, size, expected) => expect(extension(artifact, size)).toBe(expected));
@@ -139,29 +182,28 @@ test("upgrade read-only plan neither loads keys nor needs Redis", async () => {
 });
 
 test("matching finalized program avoids duplicate upgrade and signer access", async () => {
-  const { config, path, rpc, data, artifact } = upgradeFixture(); artifact.copy(data.data, 45);
-  data.data = Buffer.concat([data.data, Buffer.alloc(10_240)]);
+  const { config, path, rpc, data, artifact } = upgradeFixture(); data.data = programData(artifact, provider, 10_240);
   expect(await upgrade(config, true, rpc, path)).toMatchObject({ alreadyDeployed: true, finalized: true });
 });
 
 test("matching prefix with nonzero deployed suffix is not treated as the inspected artifact", async () => {
-  const { config, path, rpc, data, artifact } = upgradeFixture(); artifact.copy(data.data, 45);
-  data.data = Buffer.concat([data.data, Buffer.from([1])]);
+  const { config, path, rpc, data, artifact } = upgradeFixture(); data.data = programData(artifact, provider, 1); data.data[data.data.length - 1] = 1;
   expect(await upgrade(config, false, rpc, path)).not.toHaveProperty("alreadyDeployed");
 });
 
 test("matching bytes awaiting finality cannot trigger a second upgrade", async () => {
-  const { config, path, rpc, data, artifact } = upgradeFixture(); artifact.copy(data.data, 45);
-  const get = rpc.getAccountInfo.bind(rpc), stale = { ...data, data: Buffer.from(data.data) }; stale.data[45] = stale.data[45]! ^ 1;
+  const { config, path, rpc, data, artifact } = upgradeFixture(); data.data = programData(artifact);
+  const staleArtifact = Buffer.from(artifact); staleArtifact[0] = staleArtifact[0]! ^ 1;
+  const get = rpc.getAccountInfo.bind(rpc), stale = { ...data, data: programData(staleArtifact) };
   rpc.getAccountInfo = async (address, commitment) => commitment === "finalized" ? stale : get(address, commitment);
   await expect(upgrade(config, true, rpc, path)).rejects.toThrow("awaits finality");
 });
 
 test("upgrade execution uses portable CLI arguments and verifies finalized bytes without real subprocesses", async () => {
   const { config, path, rpc, data, artifact } = executionFixture();
-  data.data = data.data.subarray(0, 45);
+  data.data = programData();
   const commands: string[][] = [];
-  const run = async (args: string[]) => { commands.push(args); if (args[2] === "deploy") data.data = Buffer.concat([data.data.subarray(0, 45), artifact]); };
+  const run = async (args: string[]) => { commands.push(args); if (args[2] === "deploy") data.data = programData(artifact); };
   expect(await upgrade(config, true, rpc, path, run)).toMatchObject({ finalized: true, extensionBytes: 10_240 });
   expect(commands.map(args => args[2])).toEqual(["extend", "deploy"]);
   expect(commands[1]).toContain(join(config.base, "authority.json"));
@@ -172,7 +214,7 @@ test("upgrade execution uses portable CLI arguments and verifies finalized bytes
 
 test("CLI deploy consumes an inspected private snapshot despite original artifact replacement", async () => {
   const { config, path, rpc, data, artifact } = executionFixture();
-  data.data = data.data.subarray(0, 45);
+  data.data = programData();
   let staged = "";
   const run = async (args: string[]) => {
     if (args[2] === "extend") writeFileSync(path, "replaced after inspection");
@@ -181,7 +223,7 @@ test("CLI deploy consumes an inspected private snapshot despite original artifac
       expect(readFileSync(staged)).toEqual(artifact);
       expect(statSync(staged).mode & 0o777).toBe(0o400);
       expect(statSync(dirname(staged)).mode & 0o777).toBe(0o700);
-      data.data = Buffer.concat([data.data.subarray(0, 45), readFileSync(staged)]);
+      data.data = programData(readFileSync(staged));
     }
   };
   expect(await upgrade(config, true, rpc, path, run)).toHaveProperty("finalized", true);
@@ -198,29 +240,26 @@ test("failed CLI deployment removes the private artifact snapshot and retains re
 
 test.each([0, 1234, 5000])("retained valid buffer retry funds only missing rent, existing lamports %i", async lamports => {
   const { config, path, rpc, data, artifact, buffer, accounts } = executionFixture();
-  const retained = account("", artifact.length + 37, loader);
-  retained.data.writeUInt32LE(1); retained.data[4] = 1; provider.toBuffer().copy(retained.data, 5); retained.lamports = lamports;
+  const retained = account(bufferData(artifact.length), LOADER); retained.lamports = lamports;
   accounts.set(buffer.publicKey.toBase58(), retained);
-  const missing = Math.max(0, (artifact.length + 37) * 10 - lamports);
+  const missing = Math.max(0, (artifact.length + LOADER_BUFFER_CODEC.fixedSize) * 10 - lamports);
   rpc.getBalance = async () => 2_000_000 + missing;
-  const result = await upgrade(config, true, rpc, path, async () => { artifact.copy(data.data, 45); });
+  const result = await upgrade(config, true, rpc, path, async () => { data.data = programData(artifact); });
   expect(result).toMatchObject({ temporaryBufferLamports: missing, bufferFundingEstimated: false, requiredLamports: 2_000_000 + missing, finalized: true, shortfallLamports: 0 });
 });
 
 test("retained buffers with wrong owner, executable flag, state, authority, or size fail before CLI", async () => {
   const { config, path, rpc, artifact, buffer, accounts } = executionFixture();
-  const mutations = [
-    (a: AccountInfo<Buffer>) => { a.owner = SystemProgram.programId; },
-    (a: AccountInfo<Buffer>) => { a.executable = true; },
-    (a: AccountInfo<Buffer>) => { a.data.writeUInt32LE(3); },
-    (a: AccountInfo<Buffer>) => { a.data[4] = 0; },
-    (a: AccountInfo<Buffer>) => { market.toBuffer().copy(a.data, 5); },
-    (a: AccountInfo<Buffer>) => { a.data = a.data.subarray(0, 36); },
-    (a: AccountInfo<Buffer>) => { a.data = Buffer.concat([a.data, Buffer.alloc(1)]); },
+  const invalid = [
+    { ...account(bufferData(artifact.length), LOADER), owner: SystemProgram.programId },
+    { ...account(bufferData(artifact.length), LOADER), executable: true },
+    account(bufferData(artifact.length, provider, 3), LOADER),
+    account(bufferData(artifact.length, provider, 1, 0), LOADER),
+    account(bufferData(artifact.length, market), LOADER),
+    account(bufferData(artifact.length - 1), LOADER),
+    account(bufferData(artifact.length + 1), LOADER),
   ];
-  for (const mutate of mutations) {
-    const retained = account("", artifact.length + 37, loader);
-    retained.data.writeUInt32LE(1); retained.data[4] = 1; provider.toBuffer().copy(retained.data, 5); mutate(retained);
+  for (const retained of invalid) {
     accounts.set(buffer.publicKey.toBase58(), retained);
     let called = false;
     await expect(upgrade(config, true, rpc, path, async () => { called = true; })).rejects.toThrow("Retained upgrade buffer");

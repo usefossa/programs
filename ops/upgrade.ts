@@ -2,56 +2,77 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { LOADER_V3_PROGRAM_ADDRESS } from "@solana-program/loader-v3";
 import { Connection, PublicKey, type AccountInfo, type Signer } from "@solana/web3.js";
 import { loadConfig, loadKeypair, options, type Config } from "./config";
+import {
+  ELF_HEADER_CODEC,
+  ELF_PROGRAM_HEADER_CODEC,
+  ELF_SECTION_HEADER_CODEC,
+  LOADER_BUFFER_CODEC,
+  LOADER_PROGRAM_CODEC,
+  LOADER_PROGRAM_DATA_CODEC,
+} from "./formats";
 
-const LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
+export const LOADER = new PublicKey(LOADER_V3_PROGRAM_ADDRESS);
 
 export function validateElf(artifact: Buffer) {
   const invalid = () => { throw Error("Program artifact must be a complete ELF64 little-endian SBF binary."); };
-  if (artifact.length < 64 || !artifact.subarray(0, 7).equals(Buffer.from([127, 69, 76, 70, 2, 1, 1]))
-    || artifact.readUInt16LE(16) !== 3 || ![247, 263].includes(artifact.readUInt16LE(18))
-    || artifact.readUInt32LE(20) !== 1 || artifact.readUInt16LE(52) !== 64) invalid();
-  const range = (offset: bigint, size: bigint) => {
-    if (offset > BigInt(artifact.length) || size > BigInt(artifact.length) - offset) invalid();
-    return Number(offset);
-  };
-  const programs = artifact.readUInt16LE(56), sections = artifact.readUInt16LE(60), names = artifact.readUInt16LE(62);
-  const programOffset = artifact.readBigUInt64LE(32), sectionOffset = artifact.readBigUInt64LE(40);
-  if (!programs || programs === 0xffff || programOffset < 64n || artifact.readUInt16LE(54) !== 56) invalid();
-  const ph = range(programOffset, BigInt(programs) * 56n);
-  if (sections ? sectionOffset < 64n || artifact.readUInt16LE(58) !== 64 || names >= sections : sectionOffset !== 0n || names !== 0) invalid();
-  const sh = range(sectionOffset, BigInt(sections) * 64n), entry = artifact.readBigUInt64LE(24);
-  let executable = false;
-  for (let i = 0; i < programs; i++) {
-    const start = ph + i * 56, kind = artifact.readUInt32LE(start), flags = artifact.readUInt32LE(start + 4);
-    const offset = artifact.readBigUInt64LE(start + 8), address = artifact.readBigUInt64LE(start + 16);
-    const size = artifact.readBigUInt64LE(start + 32), memory = artifact.readBigUInt64LE(start + 40);
-    range(offset, size);
-    if (kind === 1 && memory < size) invalid();
-    if (kind === 1 && (flags & 1) && size > 0n && entry >= address && entry - address < size) executable = true;
-  }
-  if (!executable) invalid();
-  for (let i = 0; i < sections; i++) {
-    const start = sh + i * 64, kind = artifact.readUInt32LE(start + 4), link = artifact.readUInt32LE(start + 40);
-    const offset = artifact.readBigUInt64LE(start + 24), size = artifact.readBigUInt64LE(start + 32);
-    if (kind !== 8) range(offset, size); // nobits sections occupy memory, not file bytes.
-    if (link >= sections) invalid();
+  try {
+    const header = ELF_HEADER_CODEC.decode(artifact);
+    if (!Buffer.from(header.ident.magic).equals(Buffer.from([127, 69, 76, 70]))
+      || header.ident.class !== 2 || header.ident.endianness !== 1 || header.ident.version !== 1
+      || header.type !== 3 || header.machine !== 263 || header.version !== 1
+      || header.headerSize !== ELF_HEADER_CODEC.fixedSize) invalid();
+    const range = (offset: bigint, size: bigint) => {
+      if (offset > BigInt(artifact.length) || size > BigInt(artifact.length) - offset) invalid();
+      return Number(offset);
+    };
+    const programs = header.programCount, sections = header.sectionCount, names = header.sectionNames;
+    if (!programs || programs === 0xffff || header.programOffset < BigInt(ELF_HEADER_CODEC.fixedSize)
+      || header.programEntrySize !== ELF_PROGRAM_HEADER_CODEC.fixedSize) invalid();
+    const programOffset = range(header.programOffset, BigInt(programs) * BigInt(ELF_PROGRAM_HEADER_CODEC.fixedSize));
+    if (sections
+      ? header.sectionOffset < BigInt(ELF_HEADER_CODEC.fixedSize)
+        || header.sectionEntrySize !== ELF_SECTION_HEADER_CODEC.fixedSize || names >= sections
+      : header.sectionOffset !== 0n || names !== 0) invalid();
+    const sectionOffset = range(header.sectionOffset, BigInt(sections) * BigInt(ELF_SECTION_HEADER_CODEC.fixedSize));
+    let executable = false;
+    for (let i = 0; i < programs; i++) {
+      const program = ELF_PROGRAM_HEADER_CODEC.decode(artifact, programOffset + i * ELF_PROGRAM_HEADER_CODEC.fixedSize);
+      range(program.offset, program.fileSize);
+      if (program.type === 1 && program.memorySize < program.fileSize) invalid();
+      if (program.type === 1 && (program.flags & 1) && program.fileSize > 0n
+        && header.entry >= program.virtualAddress && header.entry - program.virtualAddress < program.fileSize) executable = true;
+    }
+    if (!executable) invalid();
+    for (let i = 0; i < sections; i++) {
+      const section = ELF_SECTION_HEADER_CODEC.decode(artifact, sectionOffset + i * ELF_SECTION_HEADER_CODEC.fixedSize);
+      if (section.type !== 8) range(section.offset, section.size);
+      if (section.link >= sections) invalid();
+    }
+  } catch {
+    invalid();
   }
 }
 
 export function deployed(account: AccountInfo<Buffer> | null): PublicKey {
-  if (!account?.executable || !account.owner.equals(LOADER) || account.data.length !== 36 || account.data.readUInt32LE() !== 2) throw Error("Expected an upgradeable program account.");
-  return new PublicKey(account.data.subarray(4, 36));
+  if (!account?.executable || !account.owner.equals(LOADER) || account.data.length !== LOADER_PROGRAM_CODEC.fixedSize) throw Error("Expected an upgradeable program account.");
+  const state = LOADER_PROGRAM_CODEC.decode(account.data);
+  if (state.state !== 2) throw Error("Expected an upgradeable program account.");
+  return new PublicKey(state.programData);
 }
 
 export function authority(account: AccountInfo<Buffer> | null): PublicKey {
-  if (!account || account.executable || !account.owner.equals(LOADER) || account.data.length < 45 || account.data.readUInt32LE() !== 3 || account.data[12] !== 1) throw Error("Program is immutable or ProgramData is invalid.");
-  return new PublicKey(account.data.subarray(13, 45));
+  if (!account || account.executable || !account.owner.equals(LOADER) || account.data.length < LOADER_PROGRAM_DATA_CODEC.fixedSize) throw Error("Program is immutable or ProgramData is invalid.");
+  const state = LOADER_PROGRAM_DATA_CODEC.decode(account.data);
+  if (state.state !== 3 || state.hasAuthority !== 1) throw Error("Program is immutable or ProgramData is invalid.");
+  return new PublicKey(state.authority);
 }
 
 export function extension(artifactBytes: number, dataBytes: number) {
-  return artifactBytes + 45 > dataBytes ? Math.max(artifactBytes + 45 - dataBytes, 10_240) : 0;
+  return artifactBytes + LOADER_PROGRAM_DATA_CODEC.fixedSize > dataBytes
+    ? Math.max(artifactBytes + LOADER_PROGRAM_DATA_CODEC.fixedSize - dataBytes, 10_240) : 0;
 }
 
 export function deployArgs(program: PublicKey, artifact: string, signer: string, buffer: string, rpc: string, payer = signer) {
@@ -78,8 +99,9 @@ export async function upgrade(
   const data = await rpc.getAccountInfo(dataAddress), expected = authority(data);
   const matches = (account: AccountInfo<Buffer> | null) => {
     authority(account);
-    return account!.data.subarray(45, 45 + artifact.length).equals(artifact)
-      && account!.data.subarray(45 + artifact.length).every(byte => byte === 0);
+    const offset = LOADER_PROGRAM_DATA_CODEC.fixedSize;
+    return account!.data.subarray(offset, offset + artifact.length).equals(artifact)
+      && account!.data.subarray(offset + artifact.length).every(byte => byte === 0);
   };
   if (matches(data)) {
     if (!matches(await rpc.getAccountInfo(dataAddress, "finalized"))) throw Error("Matching upgrade awaits finality; reconcile before retrying.");
@@ -88,7 +110,7 @@ export async function upgrade(
   const extensionBytes = extension(artifact.length, data!.data.length);
   const [rent, bufferRent, balance] = await Promise.all([
     rpc.getMinimumBalanceForRentExemption(data!.data.length + extensionBytes),
-    rpc.getMinimumBalanceForRentExemption(artifact.length + 37),
+    rpc.getMinimumBalanceForRentExemption(artifact.length + LOADER_BUFFER_CODEC.fixedSize),
     config.operator?.payer ? Promise.resolve(null) : rpc.getBalance(expected),
   ]);
   const extensionLamports = Math.max(0, rent - data!.lamports), required = extensionLamports + bufferRent + 2_000_000;
@@ -105,9 +127,15 @@ export async function upgrade(
     const payer = config.operator?.payer ? keys[2]! : keys[0]!;
     if ([keys[0]!, payer].some(key => key.publicKey.equals(buffer.publicKey))) throw Error("Buffer must differ from authority and fee payer.");
     const retained = await rpc.getAccountInfo(buffer.publicKey);
-    if (retained && (retained.executable || !retained.owner.equals(LOADER) || retained.data.length !== artifact.length + 37
-      || retained.data.readUInt32LE() !== 1 || retained.data[4] !== 1 || !retained.data.subarray(5, 37).equals(expected.toBuffer()))) {
-      throw Error("Retained upgrade buffer has invalid owner, layout, authority, or size; use a matching buffer or a new buffer keypair.");
+    if (retained) {
+      const state = retained.data.length >= LOADER_BUFFER_CODEC.fixedSize
+        ? LOADER_BUFFER_CODEC.decode(retained.data) : null;
+      if (retained.executable || !retained.owner.equals(LOADER)
+        || retained.data.length !== artifact.length + LOADER_BUFFER_CODEC.fixedSize
+        || state?.state !== 1 || state.hasAuthority !== 1
+        || !Buffer.from(state.authority).equals(expected.toBuffer())) {
+        throw Error("Retained upgrade buffer has invalid owner, layout, authority, or size; use a matching buffer or a new buffer keypair.");
+      }
     }
     plan.temporaryBufferLamports = Math.max(0, bufferRent - (retained?.lamports ?? 0));
     plan.bufferFundingEstimated = false;
