@@ -1,24 +1,39 @@
 #![allow(unexpected_cfgs)]
 
-pub mod abi;
+mod args;
 mod helpers;
 mod instructions;
 mod matching;
-#[cfg(feature = "legacy-migration")]
-mod migration;
 mod receipt;
-mod state;
 mod token;
 
 extern crate alloc;
 mod contexts;
-mod cross_program;
-mod schemas;
-mod wire;
+mod state_types;
 use anchor_lang::prelude::*;
+use args::*;
 use contexts::*;
-use wire::{FixedPayload, OptionalTail, Payload};
 pub const ID: Address = Address::new_from_array([8; 32]);
+
+#[error_code]
+pub enum RouterError {
+    #[msg("arithmetic overflow")]
+    Arithmetic,
+    #[msg("invalid account")]
+    InvalidAccount,
+    #[msg("invalid argument")]
+    InvalidArgument,
+    #[msg("unauthorized")]
+    Unauthorized,
+    #[msg("slippage exceeded")]
+    Slippage,
+    #[msg("capacity unavailable")]
+    Unavailable,
+    #[msg("invalid state")]
+    InvalidState,
+    #[msg("limit exceeded")]
+    LimitExceeded,
+}
 
 #[cfg(feature = "local-test")]
 pub const CLAIM_SECONDS: i64 = 30;
@@ -28,198 +43,131 @@ pub const CLAIM_SECONDS: i64 = 300;
 #[program]
 pub mod fossa_router {
     use super::*;
-    #[discrim = 0]
-    pub fn initialize_market(
-        ctx: &mut Context<InitializeMarket>,
-        p: FixedPayload<0>,
-    ) -> Result<()> {
-        instructions::market::initialize(ctx, &p.0)
+    pub fn initialize_market(ctx: &mut Context<InitializeMarket>) -> Result<()> {
+        instructions::market::initialize(ctx)
     }
-    #[discrim = 1]
-    pub fn initialize_user(ctx: &mut Context<InitializeUser>, p: FixedPayload<0>) -> Result<()> {
-        instructions::user::initialize(ctx, &p.0)
+    pub fn initialize_user(ctx: &mut Context<InitializeUser>) -> Result<()> {
+        instructions::user::initialize(ctx)
     }
-    #[discrim = 2]
-    pub fn register_offer(ctx: &mut Context<RegisterOffer>, p: FixedPayload<24>) -> Result<()> {
-        instructions::provider::register_offer(ctx, &p.0)
+    pub fn register_offer(ctx: &mut Context<RegisterOffer>, offer: Offer) -> Result<()> {
+        instructions::provider::register_offer(ctx, &offer)
     }
-    #[discrim = 3]
-    pub fn deposit(ctx: &mut Context<Deposit>, p: FixedPayload<8>) -> Result<()> {
-        instructions::user::deposit(ctx, &p.0)
+    pub fn deposit(ctx: &mut Context<Deposit>, amount: u64) -> Result<()> {
+        instructions::user::deposit(ctx, amount)
     }
-    #[discrim = 5]
-    pub fn update_offer(ctx: &mut Context<UpdateOffer>, p: FixedPayload<24>) -> Result<()> {
-        instructions::provider::update_offer(ctx, &p.0)
+    pub fn update_offer(ctx: &mut Context<UpdateOffer>, offer: Offer) -> Result<()> {
+        instructions::provider::update_offer(ctx, &offer)
     }
-    #[discrim = 6]
     pub fn reserve_booking(
         ctx: &mut Context<ReserveBooking>,
-        p: OptionalTail<107, 8>,
+        request: ReserveRequest,
+        generation: Option<u64>,
     ) -> Result<()> {
-        instructions::booking::reserve(ctx, &p.0)
+        instructions::booking::reserve(ctx, &request, generation)
     }
-    #[discrim = 7]
-    pub fn claim_booking(ctx: &mut Context<ClaimBooking>, p: OptionalTail<12, 128>) -> Result<()> {
-        instructions::booking::claim(ctx, &p.0)
+    pub fn claim_booking(ctx: &mut Context<ClaimBooking>, claim: Claim) -> Result<()> {
+        instructions::booking::claim(ctx, &claim)
     }
-    #[discrim = 8]
-    pub fn expire_booking(ctx: &mut Context<ExpireBooking>, p: OptionalTail<0, 8>) -> Result<()> {
-        helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-        instructions::booking::release(
-            ctx.program_id,
-            &mut [
-                *ctx.accounts.m.account(),
-                *ctx.accounts.mo.account(),
-                *ctx.accounts.c.account(),
-                *ctx.accounts.u.account(),
-                *ctx.accounts.b.account(),
-            ],
-            8,
-            &p.0,
-        )
+    pub fn expire_booking(ctx: &mut Context<ExpireBooking>, generation: Option<u64>) -> Result<()> {
+        instructions::booking::expire(ctx, generation)
     }
-    #[discrim = 10]
-    pub fn withdraw(ctx: &mut Context<Withdraw>, p: FixedPayload<8>) -> Result<()> {
-        instructions::user::withdraw(ctx, &p.0)
+    pub fn withdraw(ctx: &mut Context<Withdraw>, amount: u64) -> Result<()> {
+        instructions::user::withdraw(ctx, amount)
     }
-    #[discrim = 15]
-    pub fn release_booking(ctx: &mut Context<ReleaseBooking>, p: OptionalTail<0, 8>) -> Result<()> {
-        helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-        instructions::booking::release(
-            ctx.program_id,
-            &mut [
-                *ctx.accounts.m.account(),
-                *ctx.accounts.mo.account(),
-                *ctx.accounts.c.account(),
-                *ctx.accounts.u.account(),
-                *ctx.accounts.b.account(),
-                *ctx.accounts.provider.account(),
-            ],
-            15,
-            &p.0,
-        )
-    }
-    #[discrim = 17]
-    pub fn close_booking(ctx: &mut Context<CloseBooking>, p: FixedPayload<0>) -> Result<()> {
-        instructions::booking::close(ctx, &p.0)
-    }
-    #[discrim = 18]
-    pub fn initialize_model(ctx: &mut Context<InitializeModel>, p: Payload) -> Result<()> {
-        instructions::market::initialize_model(ctx, &p.0)
-    }
-    #[discrim = 19]
-    pub fn initialize_provider(ctx: &mut Context<InitializeProvider>, p: Payload) -> Result<()> {
-        instructions::provider::initialize(ctx, &p.0)
-    }
-    #[discrim = 21]
-    pub fn update_profile(ctx: &mut Context<UpdateProfile>, p: Payload) -> Result<()> {
-        instructions::provider::update_profile(ctx, &p.0)
-    }
-    #[discrim = 22]
-    pub fn update_model_metadata(ctx: &mut Context<UpdateModelMetadata>, p: Payload) -> Result<()> {
-        instructions::market::update_metadata(ctx, &p.0)
-    }
-    #[discrim = 26]
-    pub fn initialize_receipt(
-        ctx: &mut Context<InitializeReceipt>,
-        p: FixedPayload<0>,
+    pub fn release_booking(
+        ctx: &mut Context<ReleaseBooking>,
+        generation: Option<u64>,
     ) -> Result<()> {
-        receipt::initialize(ctx, &p.0)
+        instructions::booking::release(ctx, generation)
     }
-    #[discrim = 28]
-    pub fn initialize_list(
-        ctx: &mut Context<InitializeList>,
-        p: OptionalTail<4, 12>,
+    pub fn close_booking(ctx: &mut Context<CloseBooking>) -> Result<()> {
+        instructions::booking::close(ctx)
+    }
+    pub fn initialize_model(
+        ctx: &mut Context<InitializeModel>,
+        model_id: Address,
+        limit: u32,
+        metadata: Metadata,
     ) -> Result<()> {
-        instructions::list::initialize(ctx, &p.0)
+        instructions::market::initialize_model(ctx, model_id, limit, &metadata)
     }
-    #[discrim = 29]
-    pub fn update_list(ctx: &mut Context<UpdateList>, p: FixedPayload<33>) -> Result<()> {
-        instructions::list::update(ctx, &p.0)
+    pub fn initialize_provider(
+        ctx: &mut Context<InitializeProvider>,
+        metadata: Metadata,
+    ) -> Result<()> {
+        instructions::provider::initialize(ctx, &metadata)
     }
-    #[discrim = 30]
-    pub fn close_list(ctx: &mut Context<CloseList>, p: FixedPayload<0>) -> Result<()> {
-        instructions::list::close(ctx, &p.0)
+    pub fn update_profile(ctx: &mut Context<UpdateProfile>, metadata: Metadata) -> Result<()> {
+        instructions::provider::update_profile(ctx, &metadata)
     }
-    #[discrim = 32]
-    pub fn grow_books(ctx: &mut Context<GrowBooks>, p: FixedPayload<4>) -> Result<()> {
-        instructions::market::grow(ctx, &p.0)
+    pub fn update_model_metadata(
+        ctx: &mut Context<UpdateModelMetadata>,
+        metadata: Metadata,
+    ) -> Result<()> {
+        instructions::market::update_metadata(ctx, &metadata)
     }
-    #[discrim = 33]
+    pub fn initialize_receipt(ctx: &mut Context<InitializeReceipt>) -> Result<()> {
+        receipt::initialize(ctx)
+    }
+    pub fn initialize_list(ctx: &mut Context<InitializeList>, config: ListInit) -> Result<()> {
+        instructions::list::initialize(ctx, &config)
+    }
+    pub fn update_list(
+        ctx: &mut Context<UpdateList>,
+        provider: Address,
+        enabled: bool,
+    ) -> Result<()> {
+        instructions::list::update(ctx, provider, enabled)
+    }
+    pub fn close_list(ctx: &mut Context<CloseList>) -> Result<()> {
+        instructions::list::close(ctx)
+    }
+    pub fn grow_books(ctx: &mut Context<GrowBooks>, limit: u32) -> Result<()> {
+        instructions::market::grow(ctx, limit)
+    }
     pub fn initialize_list_metadata(
         ctx: &mut Context<InitializeListMetadata>,
-        p: Payload,
+        metadata: Metadata,
     ) -> Result<()> {
-        instructions::list_metadata::initialize(ctx, &p.0)
+        instructions::list_metadata::initialize(ctx, &metadata)
     }
-    #[discrim = 34]
-    pub fn update_list_metadata(ctx: &mut Context<UpdateListMetadata>, p: Payload) -> Result<()> {
-        instructions::list_metadata::update(ctx, &p.0)
-    }
-    #[discrim = 35]
-    pub fn configure_fees(ctx: &mut Context<ConfigureFees>, p: FixedPayload<137>) -> Result<()> {
-        instructions::fees::configure(ctx, &p.0)
-    }
-    #[discrim = 36]
-    pub fn configure_list_fees(
-        ctx: &mut Context<ConfigureListFees>,
-        p: FixedPayload<4>,
+    pub fn update_list_metadata(
+        ctx: &mut Context<UpdateListMetadata>,
+        metadata: Metadata,
     ) -> Result<()> {
-        instructions::fees::configure_list(ctx, &p.0)
+        instructions::list_metadata::update(ctx, &metadata)
     }
-    #[discrim = 37]
-    pub fn activate_reserve(ctx: &mut Context<ActivateReserve>, p: FixedPayload<59>) -> Result<()> {
-        instructions::reserve::activate(ctx, &p.0)
+    pub fn configure_fees(ctx: &mut Context<ConfigureFees>, config: FeeConfig) -> Result<()> {
+        instructions::fees::configure(ctx, &config)
     }
-    #[discrim = 38]
+    pub fn configure_list_fees(ctx: &mut Context<ConfigureListFees>, fees: ListFees) -> Result<()> {
+        instructions::fees::configure_list(ctx, fees)
+    }
+    pub fn activate_reserve(
+        ctx: &mut Context<ActivateReserve>,
+        config: ReserveActivation,
+    ) -> Result<()> {
+        instructions::reserve::activate(ctx, &config)
+    }
     pub fn configure_reserve(
         ctx: &mut Context<ConfigureReserve>,
-        p: FixedPayload<11>,
+        config: ReserveConfig,
     ) -> Result<()> {
-        instructions::reserve::configure(ctx, &p.0)
+        instructions::reserve::configure(ctx, config)
     }
-    #[discrim = 39]
-    pub fn redeem_reserve(ctx: &mut Context<RedeemReserve>, p: FixedPayload<16>) -> Result<()> {
-        instructions::reserve::redeem(ctx, &p.0)
+    pub fn redeem_reserve(ctx: &mut Context<RedeemReserve>, redeem: Redeem) -> Result<()> {
+        instructions::reserve::redeem(ctx, redeem)
     }
-    #[discrim = 40]
-    pub fn collect_reserve_tax(
-        ctx: &mut Context<CollectReserveTax>,
-        p: FixedPayload<0>,
-    ) -> Result<()> {
-        instructions::reserve::collect(ctx, &p.0)
+    pub fn collect_reserve_tax(ctx: &mut Context<CollectReserveTax>) -> Result<()> {
+        instructions::reserve::collect(ctx)
     }
-    #[discrim = 41]
-    pub fn sweep_reserve(ctx: &mut Context<SweepReserve>, p: FixedPayload<0>) -> Result<()> {
-        instructions::reserve::sweep_empty(ctx, &p.0)
+    pub fn sweep_reserve(ctx: &mut Context<SweepReserve>) -> Result<()> {
+        instructions::reserve::sweep_empty(ctx)
     }
-    #[discrim = 42]
-    pub fn configure_dex(ctx: &mut Context<ConfigureDex>, p: FixedPayload<0>) -> Result<()> {
-        instructions::fees::configure_dex(ctx, &p.0)
+    pub fn configure_dex(ctx: &mut Context<ConfigureDex>) -> Result<()> {
+        instructions::fees::configure_dex(ctx)
     }
-    #[discrim = 43]
-    pub fn rotate_admin(ctx: &mut Context<RotateAdmin>, p: FixedPayload<0>) -> Result<()> {
-        instructions::fees::rotate_admin(ctx, &p.0)
-    }
-    #[cfg(feature = "legacy-migration")]
-    #[discrim = 31]
-    pub fn sweep_legacy(ctx: &mut Context<SweepLegacy>, p: FixedPayload<4>) -> Result<()> {
-        migration::sweep(ctx, &p.0)
+    pub fn rotate_admin(ctx: &mut Context<RotateAdmin>) -> Result<()> {
+        instructions::fees::rotate_admin(ctx)
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/core.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/matching.rs"]
-mod matching_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/validation.rs"]
-mod validation_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/fees.rs"]
-mod fee_tests;

@@ -1,185 +1,130 @@
 use crate::{
-    abi::*,
-    helpers::{addr, err, rd16, rd32, rd64, require},
-    state::{market, writable},
+    args::{FeeConfig, ListFees},
+    helpers::require,
+    state_types::Market,
     token::{payment_mint, payment_token, payment_transfer},
 };
-use anchor_lang::prelude::Rent;
-use anchor_lang::prelude::{AccountView, ProgramResult};
-use anchor_lang::solana_program::sysvar::Sysvar as _;
-use anchor_lang::AnchorAccount;
+use anchor_lang::prelude::{Account, AccountView, Address, ProgramResult};
 
-pub(crate) fn admin(md: &[u8], signer: &AccountView) -> ProgramResult {
-    require(
-        signer.is_signer() && &md[8..40] == signer.address().as_ref(),
-        4,
-    )
-}
+const MIN_LIST_FEE_BPS: u16 = 10;
+const MAX_LIST_FEE_BPS: u16 = 300;
+const MIN_PROTOCOL_SHARE_BPS: u16 = 5000;
+
 pub(crate) fn rotate_admin(
     ctx: &mut anchor_lang::Context<crate::contexts::RotateAdmin>,
-    p: &[u8],
 ) -> ProgramResult {
-    require(ctx.remaining_accounts()?.is_empty() && p.is_empty(), 3)?;
-    let accounts = &mut ctx.accounts;
-    require(accounts.current.address() != accounts.next.address(), 3)?;
     require(
-        matches!(accounts.m.account().data_len(), MARKET_LEN | FEE_MARKET_LEN),
-        2,
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    require(accounts.m.admin == *accounts.current.address(), 4)?;
-    accounts.m.admin = *accounts.next.address();
+    let accounts = &mut ctx.accounts;
+    accounts.market.admin = *accounts.next.address();
     Ok(())
-}
-
-pub(crate) fn grow(account: &mut AccountView, payer: &AccountView, len: usize) -> ProgramResult {
-    writable(&[account, payer])?;
-    require(payer.is_signer(), 4)?;
-    if account.data_len() == len {
-        return Ok(());
-    }
-    let rent = Rent::get()?.try_minimum_balance(len)?;
-    if account.lamports() < rent {
-        crate::cross_program::transfer_lamports(payer, account, rent - account.lamports())?;
-    }
-    anchor_lang::cpi::realloc_account(account, len, payer, true)
 }
 
 pub(crate) fn validate_terms(fee: u16, protocol_share: u16) -> ProgramResult {
     require(
         (MIN_LIST_FEE_BPS..=MAX_LIST_FEE_BPS).contains(&fee)
             && (MIN_PROTOCOL_SHARE_BPS..=10_000).contains(&protocol_share),
-        3,
+        crate::RouterError::InvalidArgument,
     )
 }
 
 pub(crate) fn configure(
     ctx: &mut anchor_lang::Context<crate::contexts::ConfigureFees>,
-    p: &[u8],
+    config: &FeeConfig,
 ) -> ProgramResult {
     let mut remaining = ctx.remaining_accounts()?;
     let extra = remaining.as_mut_slice();
-    let mut m = *ctx.accounts.m.account();
-    let m = &mut m;
-    let signer = ctx.accounts.signer.account();
-    let mut payer = *ctx.accounts.payer.account();
-    let payer = &mut payer;
-    let system = ctx.accounts.system.account();
-    let program = ctx.program_id;
+    let accounts = &mut ctx.accounts;
     require(
-        p.len() == 137 && p[136] <= 1 && p[..32] != [0; 32] && p[32..64] != [0; 32],
-        3,
+        config.treasury != Address::default() && config.treasury2 != Address::default(),
+        crate::RouterError::InvalidArgument,
     )?;
-    require(extra.len() == if p[136] == 1 { 2 } else { 0 }, 3)?;
-    require(system.address() == &anchor_lang::system_program::ID, 3)?;
-    let md = market(m, program)?;
-    admin(&md, signer)?;
-    if p[136] == 1 {
+    require(
+        extra.len() == if config.creation_enabled { 2 } else { 0 },
+        crate::RouterError::InvalidArgument,
+    )?;
+    if config.creation_enabled {
         require(
-            rd64(p, 128) > 0
-                && &p[64..96] == extra[0].address().as_ref()
-                && &p[96..128] == extra[1].address().as_ref(),
-            3,
+            config.creation_net_price > 0
+                && config.creation_mint == *extra[0].address()
+                && config.creation_token_program == *extra[1].address(),
+            crate::RouterError::InvalidArgument,
         )?;
         payment_mint(&extra[0], extra[1].address())?;
     }
-    drop(md);
-    grow(m, payer, FEE_MARKET_LEN)?;
-    let mut d = m.try_borrow_mut()?;
-    d[72..209].copy_from_slice(p);
-    d[209..216].fill(0);
+    accounts.market.treasury = config.treasury;
+    accounts.market.treasury2 = config.treasury2;
+    accounts.market.creation_mint = config.creation_mint;
+    accounts.market.creation_token_program = config.creation_token_program;
+    accounts.market.creation_net_price = config.creation_net_price.into();
+    accounts.market.creation_enabled = u8::from(config.creation_enabled);
     Ok(())
 }
 
 pub(crate) fn configure_dex(
     ctx: &mut anchor_lang::Context<crate::contexts::ConfigureDex>,
-    p: &[u8],
 ) -> ProgramResult {
-    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-    let program = ctx.program_id;
-    let mut m = *ctx.accounts.m.account();
-    let m = &mut m;
-    let admin = ctx.accounts.admin.account();
-    let dex = ctx.accounts.dex.account();
-    let config = ctx.accounts.config.account();
     require(
-        p.is_empty()
-            && dex.executable()
-            && config.owner() == dex.address()
-            && config.data_len() == 192,
-        3,
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    writable(&[m])?;
-    let md = market(m, program)?;
-    require(md.len() == FEE_MARKET_LEN, 2)?;
-    self::admin(&md, admin)?;
-    let d = config.try_borrow()?;
+    let accounts = &mut ctx.accounts;
     require(
-        &d[..8] == b"FDEXCFG1" && d[8..40] == md[8..40] && d[72..104] == md[40..72],
-        2,
+        accounts.config.admin == accounts.market.admin
+            && accounts.config.quote_mint == accounts.market.mint,
+        crate::RouterError::InvalidAccount,
     )?;
-    drop((d, md));
-    let mut d = m.try_borrow_mut()?;
-    d[216..248].copy_from_slice(dex.address().as_ref());
-    d[248..280].copy_from_slice(config.address().as_ref());
+    accounts.market.dex_program = *accounts.dex.address();
+    accounts.market.dex_config = *accounts.config.address();
     Ok(())
 }
 
 pub(crate) fn configure_list(
     ctx: &mut anchor_lang::Context<crate::contexts::ConfigureListFees>,
-    p: &[u8],
+    fees: ListFees,
 ) -> ProgramResult {
-    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-    let program = ctx.program_id;
-    let m = ctx.accounts.m.account();
-    let mut list = *ctx.accounts.list.account();
-    let list = &mut list;
-    let authority = ctx.accounts.authority.account();
-    let mut payer = *ctx.accounts.payer.account();
-    let payer = &mut payer;
-    let system = ctx.accounts.system.account();
     require(
-        p.len() == 4 && system.address() == &anchor_lang::system_program::ID,
-        3,
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    validate_terms(rd16(p, 0), rd16(p, 2))?;
-    require(market(m, program)?.len() == FEE_MARKET_LEN, 7)?;
-    let d = super::list::state(list, program)?;
-    require(&d[8..40] == m.address().as_ref(), 2)?;
-    require(
-        authority.is_signer() && &d[40..72] == authority.address().as_ref(),
-        4,
-    )?;
-    let at = provider_list_len(rd32(&d, 72) as usize);
-    drop(d);
-    grow(list, payer, at + LIST_FEE_LEN)?;
-    list.try_borrow_mut()?[at..at + 4].copy_from_slice(p);
+    let accounts = &mut ctx.accounts;
+    validate_terms(fees.fee_bps, fees.protocol_share)?;
+    super::list::state(&accounts.list)?;
+    accounts.list.fee_bps = fees.fee_bps.into();
+    accounts.list.protocol_share = fees.protocol_share.into();
     Ok(())
 }
 
 pub(crate) fn creation_payment(
-    md: &[u8],
+    market: &Account<Market>,
     authority: &AccountView,
     accounts: &[AccountView],
     maximum: u64,
 ) -> ProgramResult {
-    if md[208] == 0 {
-        return require(accounts.is_empty(), 3);
+    if market.creation_enabled == 0 {
+        return require(accounts.is_empty(), crate::RouterError::InvalidArgument);
     }
     let [source, destination, mint, token] = accounts else {
-        return Err(err(3));
+        return Err(crate::RouterError::InvalidArgument.into());
     };
-    writable(&[source, destination])?;
     require(
-        &md[136..168] == mint.address().as_ref()
-            && &md[168..200] == token.address().as_ref()
+        market.creation_mint == *mint.address()
+            && market.creation_token_program == *token.address()
             && source.address() != destination.address(),
-        2,
+        crate::RouterError::InvalidAccount,
     )?;
-    let (decimals, amount) = payment_mint(mint, token.address())?.gross(rd64(md, 200))?;
-    require(amount <= maximum, 8)?;
+    let (decimals, amount) =
+        payment_mint(mint, token.address())?.gross(market.creation_net_price.get())?;
+    require(amount <= maximum, crate::RouterError::LimitExceeded)?;
+    let before = payment_token(
+        destination,
+        mint.address(),
+        &market.treasury,
+        token.address(),
+    )?;
     payment_token(source, mint.address(), authority.address(), token.address())?;
-    payment_token(destination, mint.address(), &addr(md, 72), token.address())?;
-    let before = rd64(&destination.try_borrow()?, 64);
     payment_transfer(
         source,
         mint,
@@ -189,8 +134,61 @@ pub(crate) fn creation_payment(
         amount,
         decimals,
     )?;
+    let after = payment_token(
+        destination,
+        mint.address(),
+        &market.treasury,
+        token.address(),
+    )?;
     require(
-        rd64(&destination.try_borrow()?, 64).checked_sub(before) == Some(rd64(md, 200)),
-        8,
+        after.checked_sub(before) == Some(market.creation_net_price.get()),
+        crate::RouterError::LimitExceeded,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helpers::{bps_ceil, fee_budget};
+
+    #[test]
+    fn fee_rounding_preserves_balance_and_protocol_floor() {
+        for fee in 10..=300 {
+            for base in [
+                0,
+                1,
+                2,
+                99,
+                100,
+                9999,
+                10_000,
+                1_000_001,
+                u32::MAX as u64,
+                u64::MAX,
+            ] {
+                let charged = bps_ceil(base, fee);
+                assert_eq!(
+                    u128::from(charged),
+                    (u128::from(base) * u128::from(fee)).div_ceil(10_000)
+                );
+                for share in [5000, 5001, 7500, 9999, 10_000] {
+                    let protocol = bps_ceil(charged, share);
+                    assert!(protocol <= charged);
+                    assert!(u128::from(protocol) * 2 >= u128::from(charged));
+                    assert_eq!((charged - protocol) + protocol, charged);
+                }
+                let budget = fee_budget(base, fee);
+                assert!(u128::from(budget) + u128::from(bps_ceil(budget, fee)) <= u128::from(base));
+                assert!(
+                    u128::from(budget + 1) + u128::from(bps_ceil(budget + 1, fee))
+                        > u128::from(base)
+                );
+            }
+        }
+        assert!(validate_terms(10, 5000).is_ok());
+        assert!(validate_terms(300, 10_000).is_ok());
+        for terms in [(0, 5000), (9, 5000), (301, 5000), (100, 4999), (100, 10001)] {
+            assert!(validate_terms(terms.0, terms.1).is_err());
+        }
+    }
 }

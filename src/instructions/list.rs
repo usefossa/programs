@@ -1,303 +1,136 @@
 use crate::{
-    abi::{FEE_MARKET_LEN, LIST_FEE_LEN, LIST_HEADER, LIST_MAGIC, MAX_ENTRIES},
-    helpers::{add, err, rd16, rd32, rd64, require, wr32},
-    state::{fresh, market, writable},
+    args::ListInit,
+    helpers::{add, require},
+    state_types::{List, MAX_ENTRIES},
 };
-use anchor_lang::prelude::{AccountView, Address, ProgramError, ProgramResult};
+use anchor_lang::accounts::Slab;
+use anchor_lang::prelude::{Address, ProgramError, ProgramResult};
 use anchor_lang::AnchorAccount;
 
-pub(crate) fn position(providers: &[u8], provider: &[u8]) -> Result<usize, usize> {
-    let (mut low, mut high) = (0, providers.len() / 32);
-    while low < high {
-        let mid = low + (high - low) / 2;
-        match providers[mid * 32..mid * 32 + 32].cmp(provider) {
-            core::cmp::Ordering::Less => low = mid + 1,
-            core::cmp::Ordering::Greater => high = mid,
-            core::cmp::Ordering::Equal => return Ok(mid),
-        }
-    }
-    Err(low)
-}
-
-pub(crate) struct Members<'a> {
-    tree: &'a [[u64; 4]],
-    prefix: usize,
-}
-pub(crate) fn rebuild(d: &mut [u8]) {
-    let limit = rd32(d, 72) as usize;
-    let count = rd32(d, 76) as usize;
-    let (head, tail) = d.split_at_mut(80 + limit * 32);
-    let tail = &mut tail[..limit * 32];
-    tail.fill(0);
-    // callers validate account alignment and bounded layout; cache contains integers only.
-    let keys =
-        unsafe { core::slice::from_raw_parts(head.as_ptr().add(80).cast::<[u64; 4]>(), count) };
-    let tree =
-        unsafe { core::slice::from_raw_parts_mut(tail.as_mut_ptr().cast::<[u64; 4]>(), limit) };
-    let (mut node, mut at, mut depth) = (0, 0, 0);
-    let mut stack = [0usize; 13];
-    while node < count || depth > 0 {
-        while node < count {
-            stack[depth] = node;
-            depth += 1;
-            node = node * 2 + 1;
-        }
-        depth -= 1;
-        node = stack[depth];
-        tree[node] = keys[at].map(u64::to_be);
-        at += 1;
-        node = node * 2 + 2;
-    }
-}
-impl<'a> Members<'a> {
-    pub(crate) fn new(d: &'a [u8]) -> Self {
-        let limit = rd32(d, 72) as usize;
-        let count = rd32(d, 76) as usize;
-        let mut prefix = 0;
-        if count > 0 {
-            let first = unsafe { &*d.as_ptr().add(80).cast::<[u64; 4]>() };
-            let last = unsafe { &*d.as_ptr().add(80 + (count - 1) * 32).cast::<[u64; 4]>() };
-            while prefix < 3 && first[prefix] == last[prefix] {
-                prefix += 1;
-            }
-        }
-        Self {
-            prefix,
-            tree: unsafe {
-                core::slice::from_raw_parts(
-                    d.as_ptr().add(80 + limit * 32).cast::<[u64; 4]>(),
-                    count,
-                )
-            },
-        }
-    }
-    #[inline(never)]
-    pub(crate) fn contains(&self, provider: &[u8]) -> bool {
-        // provider entries and the request word buffer are eight-byte aligned.
-        let needle = unsafe { &*provider.as_ptr().cast::<[u64; 4]>() }.map(u64::to_be);
-        if self.tree.is_empty() {
-            return false;
-        }
-        for (i, value) in needle.iter().enumerate().take(self.prefix) {
-            if self.tree[0][i] != *value {
-                return false;
-            }
-        }
-        match self.prefix {
-            0 => self.find::<0>(&needle),
-            1 => self.find::<1>(&needle),
-            2 => self.find::<2>(&needle),
-            _ => self.find::<3>(&needle),
-        }
-    }
-    #[inline(always)]
-    fn find<const START: usize>(&self, needle: &[u64; 4]) -> bool {
-        let mut node = 0;
-        let mut end = self.tree.len() * 32;
-        // a full 4096-member tree has one thirteenth-level leaf: its smallest key.
-        // resolve that key up front so every remaining lookup has at most twelve probes.
-        if self.tree.len() == MAX_ENTRIES {
-            let first = &self.tree[MAX_ENTRIES - 1];
-            'above: {
-                if START == 0 && first[0] != needle[0] {
-                    if needle[0] < first[0] {
-                        return false;
-                    }
-                    break 'above;
-                }
-                if START <= 1 && first[1] != needle[1] {
-                    if needle[1] < first[1] {
-                        return false;
-                    }
-                    break 'above;
-                }
-                if START <= 2 && first[2] != needle[2] {
-                    if needle[2] < first[2] {
-                        return false;
-                    }
-                    break 'above;
-                }
-                if needle[3] <= first[3] {
-                    return needle[3] == first[3];
-                }
-            }
-            end -= 32;
-        }
-        while node < end {
-            let key = unsafe { &*self.tree.as_ptr().cast::<u8>().add(node).cast::<[u64; 4]>() };
-            if START == 0 && key[0] != needle[0] {
-                if key[0] < needle[0] {
-                    node = node * 2 + 64;
-                } else {
-                    node = node * 2 + 32;
-                }
-                continue;
-            }
-            if START <= 1 && key[1] != needle[1] {
-                if key[1] < needle[1] {
-                    node = node * 2 + 64;
-                } else {
-                    node = node * 2 + 32;
-                }
-                continue;
-            }
-            if START <= 2 && key[2] != needle[2] {
-                if key[2] < needle[2] {
-                    node = node * 2 + 64;
-                } else {
-                    node = node * 2 + 32;
-                }
-                continue;
-            }
-            if key[3] != needle[3] {
-                if key[3] < needle[3] {
-                    node = node * 2 + 64;
-                } else {
-                    node = node * 2 + 32;
-                }
-                continue;
-            }
-            return true;
-        }
-        false
-    }
+pub(crate) fn position(providers: &[Address], provider: &Address) -> Result<usize, usize> {
+    providers.binary_search(provider)
 }
 
 pub(crate) fn state<'a>(
-    a: &'a AccountView,
-    program: &Address,
-) -> Result<impl core::ops::Deref<Target = [u8]> + 'a, ProgramError> {
-    require(a.owner() == program && a.data_len() >= LIST_HEADER, 2)?;
-    let d = a.try_borrow()?;
-    let limit = rd32(&d, 72) as usize;
+    list: &'a Slab<List, Address>,
+) -> Result<&'a Slab<List, Address>, ProgramError> {
+    let limit = list.limit.get() as usize;
     require(
-        d.as_ptr() as usize & 7 == 0
-            && &d[..8] == LIST_MAGIC
-            && (1..=MAX_ENTRIES).contains(&limit)
-            && (d.len() == LIST_HEADER + limit * 64
-                || d.len() == LIST_HEADER + limit * 64 + LIST_FEE_LEN)
-            && rd32(&d, 76) as usize <= limit,
-        2,
+        (1..=MAX_ENTRIES).contains(&limit)
+            && list.account().data_len() == Slab::<List, Address>::space_for(limit as u32)
+            && list.len() <= limit
+            && list.as_slice().windows(2).all(|pair| pair[0] < pair[1]),
+        crate::RouterError::InvalidAccount,
     )?;
-    Ok(d)
+    Ok(list)
 }
 
 pub(crate) fn initialize(
     ctx: &mut anchor_lang::Context<crate::contexts::InitializeList>,
-    p: &[u8],
+    config: &ListInit,
 ) -> ProgramResult {
     let mut remaining = ctx.remaining_accounts()?;
     let payment = remaining.as_mut_slice();
-    let m = ctx.accounts.m.account();
-    let mut list = *ctx.accounts.list.account();
-    let list = &mut list;
-    let authority = ctx.accounts.authority.account();
-    let program = ctx.program_id;
-    require(authority.is_signer(), 4)?;
-    let md = market(m, program)?;
-    let fees = md.len() == FEE_MARKET_LEN;
-    require(p.len() == if fees { 16 } else { 4 }, 3)?;
-    if fees {
-        super::fees::validate_terms(rd16(p, 4), rd16(p, 6))?;
-        super::fees::creation_payment(&md, authority, payment, rd64(p, 8))?;
-    } else {
-        require(payment.is_empty(), 3)?;
-    }
-    let limit = rd32(p, 0) as usize;
-    require((1..=MAX_ENTRIES).contains(&limit), 3)?;
-    fresh(
-        list,
-        program,
-        LIST_HEADER + limit * 64 + if fees { LIST_FEE_LEN } else { 0 },
+    let accounts = &mut ctx.accounts;
+    let authority = accounts.authority.account();
+    let configured = accounts.market.creation_enabled == 1;
+    require(
+        config.fees.is_some() == configured,
+        crate::RouterError::InvalidArgument,
     )?;
-    let mut d = list.try_borrow_mut()?;
-    d[..8].copy_from_slice(LIST_MAGIC);
-    d[8..40].copy_from_slice(m.address().as_ref());
-    d[40..72].copy_from_slice(authority.address().as_ref());
-    wr32(&mut d, 72, limit as u32);
-    if fees {
-        let at = LIST_HEADER + limit * 64;
-        d[at..at + 4].copy_from_slice(&p[4..8]);
-    }
+    let (fee_bps, protocol_share) = if let Some(fees) = config.fees {
+        super::fees::validate_terms(fees.fee_bps, fees.protocol_share)?;
+        super::fees::creation_payment(
+            &accounts.market,
+            authority,
+            payment,
+            config.maximum_payment,
+        )?;
+        (fees.fee_bps, fees.protocol_share)
+    } else {
+        require(payment.is_empty(), crate::RouterError::InvalidArgument)?;
+        (0, 0)
+    };
+    let limit = config.limit as usize;
+    require(
+        (1..=MAX_ENTRIES).contains(&limit)
+            && accounts.list.account().data_len() == Slab::<List, Address>::space_for(limit as u32),
+        crate::RouterError::InvalidArgument,
+    )?;
+    accounts.list.market = *accounts.market.address();
+    accounts.list.authority = *authority.address();
+    accounts.list.limit = (limit as u32).into();
+    accounts.list.fee_bps = fee_bps.into();
+    accounts.list.protocol_share = protocol_share.into();
     Ok(())
 }
 
 pub(crate) fn update(
     ctx: &mut anchor_lang::Context<crate::contexts::UpdateList>,
-    p: &[u8],
+    provider: Address,
+    enabled: bool,
 ) -> ProgramResult {
-    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-    let program = ctx.program_id;
-    let m = ctx.accounts.m.account();
-    let mut list = *ctx.accounts.list.account();
-    let list = &mut list;
-    let authority = ctx.accounts.authority.account();
-    require(p.len() == 33 && p[32] <= 1 && p[..32] != [0; 32], 3)?;
-    writable(&[list])?;
-    market(m, program)?;
-    let d = state(list, program)?;
-    require(&d[8..40] == m.address().as_ref(), 2)?;
     require(
-        authority.is_signer() && &d[40..72] == authority.address().as_ref(),
-        4,
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    let count = rd32(&d, 76) as usize;
-    let found = position(&d[LIST_HEADER..LIST_HEADER + count * 32], &p[..32]);
-    let (at, next) = if p[32] == 1 {
-        require(count < rd32(&d, 72) as usize, 6)?;
-        (found.err().ok_or(err(7))?, count + 1)
+    let accounts = &mut ctx.accounts;
+    require(
+        provider != Address::default(),
+        crate::RouterError::InvalidArgument,
+    )?;
+    state(&accounts.list)?;
+    let count = accounts.list.len();
+    let found = position(accounts.list.as_slice(), &provider);
+    if enabled {
+        require(
+            count < accounts.list.limit.get() as usize,
+            crate::RouterError::Unavailable,
+        )?;
+        let at = found.err().ok_or(crate::RouterError::InvalidState)?;
+        accounts.list.try_push(provider)?;
+        accounts.list.as_mut_slice()[at..=count].rotate_right(1);
     } else {
-        (found.map_err(|_| err(7))?, count - 1)
-    };
-    drop(d);
-    let mut d = list.try_borrow_mut()?;
-    let start = LIST_HEADER + at * 32;
-    if p[32] == 1 {
-        d.copy_within(start..LIST_HEADER + count * 32, start + 32);
-        d[start..start + 32].copy_from_slice(&p[..32]);
-    } else {
-        d.copy_within(start + 32..LIST_HEADER + count * 32, start);
-        d[LIST_HEADER + next * 32..LIST_HEADER + count * 32].fill(0);
+        let at = found.map_err(|_| crate::RouterError::InvalidState)?;
+        accounts.list.as_mut_slice()[at..count].rotate_left(1);
+        accounts.list.pop();
     }
-    wr32(&mut d, 76, next as u32);
-    rebuild(&mut d);
     Ok(())
 }
 
-pub(crate) fn close(
-    ctx: &mut anchor_lang::Context<crate::contexts::CloseList>,
-    p: &[u8],
-) -> ProgramResult {
-    crate::helpers::require(ctx.remaining_accounts()?.is_empty(), 3)?;
-    let program = ctx.program_id;
-    let mut list = *ctx.accounts.list.account();
-    let list = &mut list;
-    let mut authority = *ctx.accounts.authority.account();
-    let authority = &mut authority;
-    let mut metadata = *ctx.accounts.metadata.account();
-    let metadata = &mut metadata;
-    require(p.is_empty() && list.address() != authority.address(), 3)?;
-    writable(&[list, authority, metadata])?;
-    let d = state(list, program)?;
+pub(crate) fn close(ctx: &mut anchor_lang::Context<crate::contexts::CloseList>) -> ProgramResult {
     require(
-        authority.is_signer() && &d[40..72] == authority.address().as_ref(),
-        4,
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    require(rd32(&d, 76) == 0, 7)?;
-    let bump = super::list_metadata::canonical(metadata, list, program)?;
-    let has_metadata =
-        metadata.owner() != &anchor_lang::system_program::ID || metadata.data_len() != 0;
+    let accounts = &mut ctx.accounts;
+    state(&accounts.list)?;
+    require(accounts.list.is_empty(), crate::RouterError::InvalidState)?;
+    let bump = ctx.bumps.metadata;
+    let has_metadata = accounts.metadata.owner() != &anchor_lang::system_program::ID
+        || accounts.metadata.data_len() != 0;
     if has_metadata {
-        super::list_metadata::validate(metadata, list, &d, program, bump)?;
+        super::list_metadata::validate(
+            accounts.metadata.account(),
+            &accounts.list,
+            ctx.program_id,
+            bump,
+        )?;
     }
-    drop(d);
     let refund = add(
-        list.lamports(),
-        if has_metadata { metadata.lamports() } else { 0 },
+        accounts.list.account().lamports(),
+        if has_metadata {
+            accounts.metadata.lamports()
+        } else {
+            0
+        },
     )?;
+    let mut authority = *accounts.authority.account();
     authority.set_lamports(add(authority.lamports(), refund)?);
     if has_metadata {
+        let mut metadata = *accounts.metadata.account();
         metadata.close()?;
     }
+    let mut list = *accounts.list.account();
     list.close()
 }

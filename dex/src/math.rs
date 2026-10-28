@@ -3,12 +3,9 @@ use anchor_lang::prelude::ProgramError;
 pub type Result<T> = core::result::Result<T, ProgramError>;
 pub const BPS: u64 = 10_000;
 
-pub fn check(ok: bool, code: u32) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(ProgramError::Custom(code))
-    }
+pub fn check(ok: bool, error: crate::DexError) -> Result<()> {
+    anchor_lang::require!(ok, ProgramError::from(error));
+    Ok(())
 }
 pub fn add(a: u64, b: u64) -> Result<u64> {
     a.checked_add(b).ok_or(ProgramError::ArithmeticOverflow)
@@ -20,20 +17,20 @@ pub fn narrow(n: u128) -> Result<u64> {
     n.try_into().map_err(|_| ProgramError::ArithmeticOverflow)
 }
 pub fn mul_div(a: u64, b: u64, denominator: u64, ceil: bool) -> Result<u64> {
-    check(denominator != 0, 1)?;
+    check(denominator != 0, crate::DexError::InvalidArithmetic)?;
     let product = u128::from(a) * u128::from(b);
     let divisor = u128::from(denominator);
     narrow(product / divisor + u128::from(ceil && product % divisor != 0))
 }
 pub fn fee(amount: u64, bps: u16, cap: u64) -> Result<u64> {
-    check(u64::from(bps) <= BPS, 1)?;
+    check(u64::from(bps) <= BPS, crate::DexError::InvalidArithmetic)?;
     if bps == 0 || cap == 0 {
         return Ok(0);
     }
     Ok(mul_div(amount, u64::from(bps), BPS, true)?.min(cap))
 }
 pub fn gross(net: u64, bps: u16, cap: u64) -> Result<u64> {
-    check(u64::from(bps) <= BPS, 1)?;
+    check(u64::from(bps) <= BPS, crate::DexError::InvalidArithmetic)?;
     if net == 0 || bps == 0 || cap == 0 {
         return Ok(net);
     }
@@ -50,11 +47,17 @@ pub fn gross(net: u64, bps: u16, cap: u64) -> Result<u64> {
     }
 }
 pub fn output(reserve_in: u64, reserve_out: u64, input: u64) -> Result<u64> {
-    check(reserve_in > 0 && reserve_out > 0 && input > 0, 1)?;
+    check(
+        reserve_in > 0 && reserve_out > 0 && input > 0,
+        crate::DexError::InvalidArithmetic,
+    )?;
     mul_div(reserve_out, input, add(reserve_in, input)?, false)
 }
 pub fn input(reserve_in: u64, reserve_out: u64, output: u64) -> Result<u64> {
-    check(reserve_in > 0 && output > 0 && output < reserve_out, 1)?;
+    check(
+        reserve_in > 0 && output > 0 && output < reserve_out,
+        crate::DexError::InvalidArithmetic,
+    )?;
     mul_div(reserve_in, output, sub(reserve_out, output)?, true)
 }
 pub fn sqrt(value: u128) -> u64 {

@@ -1,9 +1,0 @@
-{
-  "name": "fossa-programs",
-  "private": true,
-  "scripts": {
-    "test": "cargo test --locked && cargo test --locked --manifest-path dex/Cargo.toml && bun run --cwd ops test",
-    "test:vm": "cargo build-sbf -- --locked && cargo build-sbf --features legacy-migration --sbf-out-dir target/migration -- --locked && cargo build-sbf --manifest-path dex/Cargo.toml --sbf-out-dir dex/target/deploy -- --locked && cargo test --locked --manifest-path tests/stress/Cargo.toml && cargo run --locked --manifest-path tests/vm/Cargo.toml && CARGO_TARGET_DIR=tests/vm/target cargo run --locked --manifest-path dex/tests/vm/Cargo.toml",
-    "test:stress": "cargo build-sbf -- --locked && cargo build-sbf --features legacy-migration --sbf-out-dir target/migration -- --locked && cargo build-sbf --manifest-path dex/Cargo.toml --sbf-out-dir dex/target/deploy -- --locked && cargo run --release --locked --manifest-path tests/stress/Cargo.toml"
-  }
-}

@@ -433,6 +433,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fossa-dex"
+version = "0.3.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "bincode",
+ "bytemuck",
+ "solana-loader-v3-interface",
+ "solana-sdk-ids",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -521,10 +533,12 @@ dependencies = [
 
 [[package]]
 name = "inference-router-program"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
+ "bytemuck",
+ "fossa-dex",
 ]
 
 [[package]]
@@ -901,6 +915,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1236,6 +1260,21 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
+]
+
+[[package]]
+name = "solana-loader-v3-interface"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68029ab11d9c891d4ce23ada75745e40f983c5674af366f447b672569634231b"
+dependencies = [
+ "serde",
+ "serde_bytes",
+ "serde_derive",
+ "solana-instruction 3.5.1",
+ "solana-pubkey 4.4.0",
+ "solana-sdk-ids",
+ "solana-system-interface",
 ]
 
 [[package]]

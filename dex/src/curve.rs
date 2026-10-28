@@ -17,11 +17,11 @@ impl Curve {
             .checked_mul(u128::from(self.virtual_b))
             .ok_or(ProgramError::ArithmeticOverflow)?;
         let denominator = u128::from(self.virtual_a) * 2;
-        check(denominator > 0, 3)?;
+        check(denominator > 0, crate::DexError::InvalidArgument)?;
         narrow(value / denominator + u128::from(ceil && value % denominator != 0))
     }
     pub fn out(self, a: u64, b: u64, a_to_b: bool, amount: u64) -> Result<u64> {
-        check(amount > 0, 3)?;
+        check(amount > 0, crate::DexError::InvalidArgument)?;
         match self.kind {
             0 => {
                 if a_to_b {
@@ -40,7 +40,7 @@ impl Curve {
             2 => {
                 let sold = self.sold(a)?;
                 if a_to_b {
-                    check(amount <= sold, 5)?;
+                    check(amount <= sold, crate::DexError::Slippage)?;
                     self.scaled(
                         u128::from(sold) * u128::from(sold)
                             - u128::from(sold - amount) * u128::from(sold - amount),
@@ -57,11 +57,11 @@ impl Curve {
                     sub(sqrt(square), sold)
                 }
             }
-            _ => Err(ProgramError::Custom(3)),
+            _ => Err(crate::DexError::InvalidArgument.into()),
         }
     }
     pub fn input(self, a: u64, b: u64, a_to_b: bool, amount: u64) -> Result<u64> {
-        check(amount > 0, 3)?;
+        check(amount > 0, crate::DexError::InvalidArgument)?;
         match self.kind {
             0 => {
                 if a_to_b {
@@ -97,7 +97,7 @@ impl Curve {
                     )
                 }
             }
-            _ => Err(ProgramError::Custom(3)),
+            _ => Err(crate::DexError::InvalidArgument.into()),
         }
     }
     pub fn price(self, a: u64, b: u64) -> Result<(u64, u64)> {
@@ -108,7 +108,7 @@ impl Curve {
                 narrow(u128::from(self.virtual_b) * u128::from(self.sold(a)?))?,
                 self.virtual_a,
             )),
-            _ => Err(ProgramError::Custom(3)),
+            _ => Err(crate::DexError::InvalidArgument.into()),
         }
     }
 }
