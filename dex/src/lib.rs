@@ -15,7 +15,7 @@ pub use contexts::*;
 use curve::Curve;
 use math::{add, check, fee, gross, mul_div, sqrt, sub};
 use state::{lp, rates};
-pub const ID: Address = Address::new_from_array([9; 32]);
+pub const ID: Address = anchor_lang::address!("ATCvBRgBEyxnHbHWjdEF6tXDBUJaSNJx2cAd2MhUk9KQ");
 pub const ACTION_FEE_LAMPORTS: u64 = 25_000_000;
 pub const ORACLE_WINDOW_SECONDS: u64 = 1_800;
 pub const PUBLIC_RAISE_USDC_ATOMS: u64 = 8_500_000_000;
