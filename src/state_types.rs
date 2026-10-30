@@ -5,10 +5,9 @@ pub const MAX_ENTRIES: usize = 4096;
 
 #[account]
 pub struct Market {
-    pub admin: Address,
+    pub council: Address,
     pub mint: Address,
-    pub treasury: Address,
-    pub treasury2: Address,
+    pub bank: Address,
     pub creation_mint: Address,
     pub creation_token_program: Address,
     pub creation_net_price: PodU64,
@@ -26,10 +25,19 @@ pub struct Model {
     pub capacity: Address,
     pub limit: PodU32,
     pub bump: u8,
-    pub route_to_reserve: u8,
-    pub reserved: [u8; 2],
+    pub reserved: [u8; 3],
+    pub group: Address,
+}
+
+#[account]
+pub struct ModelGroup {
+    pub market: Address,
+    pub group_id: Address,
     pub backing_vault: Address,
     pub fixed_token_mint: Address,
+    pub route_to_reserve: u8,
+    pub bump: u8,
+    pub reserved: [u8; 6],
 }
 
 #[account]
@@ -159,6 +167,7 @@ pub struct Booking {
     pub estimated_score: PodU64,
     pub creator: Address,
     pub protocol_destination: Address,
+    pub reserve_authority: Address,
     pub fee_bps: PodU16,
     pub protocol_share: PodU16,
     pub reserve_destination: u8,

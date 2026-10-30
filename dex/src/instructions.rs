@@ -1,17 +1,19 @@
 use super::*;
 use crate::args::{
-    CollectArgs, ConfigInit, CurveInit, GlobalConfig, LiquidityArgs, ModelCurve, PoolInit,
-    SwapArgs, VestingArgs,
+    CollectArgs, ConfigInit, CurveInit, GlobalConfig, LiquidityArgs, PoolInit, SwapArgs,
 };
 use crate::state_types::Pool;
 
 const MINIMUM_LIQUIDITY: u64 = 1_000;
+const MODEL_MINIMUM_BASE_ATOMS: u64 =
+    (MODEL_CURVE_SUPPLY_ATOMS as u128 * (MODEL_VIRTUAL_USDC_ATOMS - MODEL_RAISE_USDC_ATOMS) as u128
+        / (MODEL_VIRTUAL_USDC_ATOMS + MODEL_RAISE_USDC_ATOMS) as u128) as u64;
 const STANDARD: u8 = 0;
 const REWARD: u8 = 1;
 const COMMUNITY: u8 = 2;
-const MODEL: u8 = 3;
+pub(crate) const MODEL: u8 = 3;
 const CURVE: u8 = 0;
-const AMM: u8 = 1;
+pub(crate) const AMM: u8 = 1;
 pub(crate) fn initialize_config(
     ctx: &mut Context<InitializeConfig>,
     input: ConfigInit,
@@ -20,7 +22,7 @@ pub(crate) fn initialize_config(
         ctx.remaining_accounts()?.is_empty(),
         crate::DexError::InvalidArgument,
     )?;
-    let admin = &ctx.accounts.admin;
+    let council = &ctx.accounts.council;
     let config = &mut ctx.accounts.config;
     let mut mint = *ctx.accounts.mint.account();
     let mint = &mut mint;
@@ -52,7 +54,7 @@ pub(crate) fn initialize_config(
         distributor == global.distributor,
         crate::DexError::InvalidArgument,
     )?;
-    config.admin = *admin.address();
+    config.council = *council.address();
     config.treasury = input.treasury;
     config.quote_mint = *mint.address();
     config.trade_bps = input.rates.trade_bps.into();
@@ -60,6 +62,23 @@ pub(crate) fn initialize_config(
     config.creator_share = input.rates.creator_share.into();
     config.distributor = distributor;
     config.enabled = 1;
+    if mint.address() == &global.usdc_mint {
+        check(
+            ctx.accounts.reference_pool.is_none() && ctx.accounts.mint.decimals() == 6,
+            crate::DexError::InvalidAccount,
+        )?;
+    } else if let Some(reference) = ctx.accounts.reference_pool.as_ref() {
+        check(
+            reference.mode == MODEL
+                && reference.status == AMM
+                && reference.locked_lp.get() > 0
+                && reference.mint_a == *mint.address()
+                && reference.mint_b == global.usdc_mint,
+            crate::DexError::InvalidAccount,
+        )?;
+        config.reference_pool = *reference.address();
+        oracle::checkpoint(config, reference, oracle::timestamp(&Clock::get()?)?)?;
+    }
     Ok(())
 }
 
@@ -67,15 +86,50 @@ pub(crate) fn initialize_config(
 enum LaunchParameters {
     Pool(PoolInit),
     Curve(CurveInit),
-    Model(ModelCurve),
+    Model,
 }
 
-pub(crate) fn initialize_pool(
-    accounts: &mut Launch,
-    authority_bump: u8,
-    input: PoolInit,
-) -> Result<()> {
-    initialize(accounts, authority_bump, LaunchParameters::Pool(input))
+fn public_curve(target_b: u64) -> Result<Curve> {
+    let denominator = PUBLIC_CURVE_SALE_ATOMS - PUBLIC_LIQUIDITY_ATOMS;
+    let curve = Curve {
+        initial: PUBLIC_SUPPLY_ATOMS,
+        // rounding retains at least the intended liquidity inventory and a solvent graduation.
+        virtual_a: mul_div(
+            PUBLIC_LIQUIDITY_ATOMS,
+            PUBLIC_LIQUIDITY_ATOMS,
+            denominator,
+            false,
+        )?,
+        virtual_b: mul_div(target_b, PUBLIC_LIQUIDITY_ATOMS, denominator, true)?,
+    };
+    let sold = curve.out(curve.initial, 0, false, target_b)?;
+    // reject quote precision that shifts the intended sale by more than one basis point of supply.
+    check(
+        sub(PUBLIC_CURVE_SALE_ATOMS, sold)? <= PUBLIC_SUPPLY_ATOMS / 10_000,
+        crate::DexError::InvalidArgument,
+    )?;
+    Ok(curve)
+}
+
+pub(crate) fn initialize_pool(ctx: &mut Context<InitializePool>, input: PoolInit) -> Result<()> {
+    let launch = &mut ctx.accounts.launch;
+    let council = ctx
+        .accounts
+        .council
+        .as_ref()
+        .is_some_and(|council| council.address() == &launch.global.council);
+    check(
+        council
+            || (launch.mint_a.address() != &launch.global.usdc_mint
+                && launch.mint_b.address() != &launch.global.usdc_mint
+                && launch.config.reference_pool != Address::default()),
+        crate::DexError::Unauthorized,
+    )?;
+    initialize(
+        launch,
+        ctx.bumps.launch.authority,
+        LaunchParameters::Pool(input),
+    )
 }
 
 pub(crate) fn initialize_curve(
@@ -86,19 +140,17 @@ pub(crate) fn initialize_curve(
     initialize(accounts, authority_bump, LaunchParameters::Curve(input))
 }
 
-pub(crate) fn initialize_model_curve(
-    accounts: &mut Launch,
-    authority_bump: u8,
-    input: ModelCurve,
-) -> Result<()> {
-    initialize(accounts, authority_bump, LaunchParameters::Model(input))
+pub(crate) fn initialize_model_curve(accounts: &mut Launch, authority_bump: u8) -> Result<()> {
+    initialize(accounts, authority_bump, LaunchParameters::Model)
 }
 
 fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> Result<()> {
     let curve = !matches!(parameters, LaunchParameters::Pool(_));
-    let existing = matches!(parameters, LaunchParameters::Model(_));
+    let existing = matches!(parameters, LaunchParameters::Model);
     let Launch {
         payer,
+        global,
+        treasury,
         config,
         token_a,
         token_b,
@@ -113,15 +165,23 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
         vault_b,
         lp_mint,
         user_lp,
-        system_program: _,
+        system_program,
     } = accounts;
-    let kind = match parameters {
-        LaunchParameters::Curve(input) => input.curve_kind,
-        _ => 0,
-    };
-    check(kind <= 2, crate::DexError::InvalidArgument)?;
+    check(
+        mint_a.address() != mint_b.address(),
+        crate::DexError::InvalidArgument,
+    )?;
+    check(
+        !curve
+            || if existing {
+                mint_b.address() == &global.usdc_mint
+            } else {
+                mint_b.address() != &global.usdc_mint && config.reference_pool != Address::default()
+            },
+        crate::DexError::Unauthorized,
+    )?;
     let mode = match parameters {
-        LaunchParameters::Model(_) => MODEL,
+        LaunchParameters::Model => MODEL,
         LaunchParameters::Curve(input) => input.mode,
         LaunchParameters::Pool(_) => STANDARD,
     };
@@ -145,11 +205,54 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
     let protocol_share = config.protocol_share.get();
     let creator_share = config.creator_share.get();
     rates(trade_bps, protocol_share, creator_share)?;
-    let epoch = Clock::get()?.epoch;
+    let clock = Clock::get()?;
+    let now = oracle::timestamp(&clock)?;
+    let epoch = clock.epoch;
     let mint_a_state = token::mint(mint_a, token_a.account(), epoch, curve && !existing)?;
     let mint_b_state = token::mint(mint_b, token_b.account(), epoch, true)?;
+    let preset = match parameters {
+        LaunchParameters::Model => {
+            check(
+                payer.address() == &global.council,
+                crate::DexError::Unauthorized,
+            )?;
+            check(
+                source_a.amount() == MODEL_TREASURY_ATOMS,
+                crate::DexError::InvalidAccount,
+            )?;
+            check(
+                mint_a_state.decimals == MODEL_TOKEN_DECIMALS
+                    && mint_a_state.supply == MODEL_SUPPLY_ATOMS,
+                crate::DexError::InvalidArgument,
+            )?;
+            Some((
+                Curve {
+                    initial: MODEL_CURVE_SUPPLY_ATOMS,
+                    virtual_a: MODEL_CURVE_SUPPLY_ATOMS,
+                    virtual_b: MODEL_VIRTUAL_USDC_ATOMS,
+                },
+                MODEL_RAISE_USDC_ATOMS,
+                MODEL_MINIMUM_BASE_ATOMS,
+            ))
+        }
+        LaunchParameters::Curve(_) => {
+            check(
+                mint_a_state.decimals == PUBLIC_TOKEN_DECIMALS,
+                crate::DexError::InvalidArgument,
+            )?;
+            let target = oracle::target(config, PUBLIC_RAISE_USDC_ATOMS, now)?;
+            Some((public_curve(target)?, target, PUBLIC_LIQUIDITY_ATOMS))
+        }
+        LaunchParameters::Pool(_) => None,
+    };
+    // both model allocations are minted directly, avoiding taxable bootstrap transfers.
+    let initial_vault_a = if existing {
+        MODEL_CURVE_SUPPLY_ATOMS
+    } else {
+        0
+    };
     check(
-        token::account(vault_a, true)? == 0 && token::account(vault_b, true)? == 0,
+        token::account(vault_a, true)? == initial_vault_a && token::account(vault_b, true)? == 0,
         crate::DexError::InvalidAccount,
     )?;
     token::account(source_a, false)?;
@@ -162,20 +265,9 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
             u32::from(protocol_share) + u32::from(creator_share) == 10_000,
             crate::DexError::InvalidArgument,
         )?;
-        let supply = if existing {
-            let LaunchParameters::Model(input) = parameters else {
-                unreachable!()
-            };
-            token::transfer(
-                source_a,
-                mint_a,
-                vault_a,
-                payer.account(),
-                input.supply,
-                mint_a_state.decimals,
-                &[],
-            )?
-        } else {
+        let (preset, target, minimum) = preset.ok_or(crate::DexError::InvalidArgument)?;
+        validate_curve(preset, target, minimum)?;
+        if !existing {
             check(mint_a_state.supply == 0, crate::DexError::InvalidArgument)?;
             token::curve_mint(
                 mint_a,
@@ -183,10 +275,7 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
                 tax_bps,
                 mode == REWARD || mode == COMMUNITY,
             )?;
-            let LaunchParameters::Curve(input) = parameters else {
-                unreachable!()
-            };
-            let supply = input.curve.supply;
+            let supply = PUBLIC_SUPPLY_ATOMS;
             anchor_spl::token_interface::mint_to(
                 CpiContext::new_with_signer(
                     token_a.address(),
@@ -212,32 +301,16 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
                 None,
             )?;
             check(vault_a.amount() == supply, crate::DexError::InvalidAccount)?;
-            supply
-        };
-        let curve_input = match parameters {
-            LaunchParameters::Model(input) => input,
-            LaunchParameters::Curve(input) => input.curve,
-            LaunchParameters::Pool(_) => unreachable!(),
-        };
-        let virtual_a = curve_input.virtual_a;
-        let virtual_b = curve_input.virtual_b;
-        let target = curve_input.target_b;
-        let minimum = curve_input.minimum_a;
-        check(
-            supply > minimum && minimum > 0 && virtual_b > 0 && target > 0,
-            crate::DexError::InvalidArgument,
-        )?;
-        validate_curve(
-            Curve {
-                kind,
-                initial: supply,
-                virtual_a,
-                virtual_b,
-            },
+        }
+        (
+            preset.initial,
+            0,
+            preset.virtual_a,
+            preset.virtual_b,
             target,
             minimum,
-        )?;
-        (supply, 0, virtual_a, virtual_b, target, minimum, 0)
+            0,
+        )
     } else {
         let LaunchParameters::Pool(input) = parameters else {
             unreachable!()
@@ -262,8 +335,8 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
         )?;
         check(x > 0 && y > 0, crate::DexError::InvalidArgument)?;
         let total = sqrt(u128::from(x) * u128::from(y));
-        check(total > MINIMUM_LIQUIDITY, crate::DexError::InvalidArgument)?;
-        let minted = sub(total, MINIMUM_LIQUIDITY)?;
+        check(total > 0, crate::DexError::InvalidArgument)?;
+        let minted = total;
         check(minted >= input.minimum_lp, crate::DexError::Slippage)?;
         anchor_spl::token::mint_to(
             CpiContext::new_with_signer(
@@ -277,7 +350,7 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
             ),
             minted,
         )?;
-        (x, y, 0, 0, 0, 0, MINIMUM_LIQUIDITY)
+        (x, y, 0, 0, 0, 0, 0)
     };
     pool.config = *config.address();
     pool.creator = *payer.address();
@@ -300,20 +373,36 @@ fn initialize(accounts: &mut Launch, bump: u8, parameters: LaunchParameters) -> 
     pool.bump = bump;
     pool.status = if curve { CURVE } else { AMM };
     pool.mode = mode;
-    pool.curve_kind = kind;
     pool.tax_bps = tax_bps.into();
     pool.distributor = config.distributor;
     pool.initial_base = reserve_a.into();
-    Ok(())
+    pool.price_timestamp = now.into();
+    action_fee(payer, treasury, system_program)
+}
+
+fn action_fee(
+    payer: &mut Signer,
+    treasury: &mut SystemAccount,
+    system: &Program<System>,
+) -> Result<()> {
+    if payer.address() == treasury.address() {
+        return Ok(());
+    }
+    anchor_lang::system_program::transfer(
+        CpiContext::new(
+            system.address(),
+            anchor_lang::system_program::Transfer {
+                from: payer.try_to_cpi_handle_mut()?,
+                to: treasury.try_to_cpi_handle_mut()?,
+            },
+        ),
+        ACTION_FEE_LAMPORTS,
+    )
 }
 
 pub(crate) fn validate_curve(curve: Curve, target: u64, minimum: u64) -> Result<()> {
     check(
-        curve.initial > minimum
-            && minimum > 0
-            && curve.virtual_b > 0
-            && target > 0
-            && (curve.kind == 0 || curve.virtual_a > 0),
+        curve.initial > minimum && minimum > 0 && curve.virtual_b > 0 && target > 0,
         crate::DexError::InvalidArgument,
     )?;
     check(
@@ -343,15 +432,28 @@ fn validate_terminal(curve: Curve, a: u64, b: u64, target: u64, minimum: u64) ->
 
 fn pool_curve(pool: &Pool) -> Curve {
     Curve {
-        kind: if pool.status == AMM {
-            0
-        } else {
-            pool.curve_kind
-        },
         initial: pool.initial_base.get(),
         virtual_a: pool.virtual_a.get(),
         virtual_b: pool.virtual_b.get(),
     }
+}
+
+fn trade_gross(effective: u64, creator_bps: u16) -> math::Result<u64> {
+    let mut received = gross(effective, 125 + creator_bps, u64::MAX)?;
+    for _ in 0..4 {
+        if sub(
+            received,
+            add(
+                fee(received, 125, u64::MAX)?,
+                fee(received, creator_bps, u64::MAX)?,
+            )?,
+        )? >= effective
+        {
+            return Ok(received);
+        }
+        received = add(received, 1)?;
+    }
+    Err(crate::DexError::InvalidArithmetic.into())
 }
 
 pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Result<()> {
@@ -369,11 +471,12 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
         vault_b,
     } = accounts;
     let mut pool_state = **pool;
+    let clock = Clock::get()?;
     let [mint_a_state, mint_b_state] = pool_state.validate(
         [&*mint_a, &*mint_b],
         [&*vault_a, &*vault_b],
         [token_a.account(), token_b.account()],
-        Clock::get()?.epoch,
+        clock.epoch,
     )?;
     token::account(user_a, false)?;
     token::account(user_b, false)?;
@@ -382,6 +485,7 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
             || (pool_state.status == CURVE && pool_state.reserve_b < pool_state.target_b),
         crate::DexError::Unavailable,
     )?;
+    oracle::accumulate(&mut pool_state, oracle::timestamp(&clock)?)?;
     let a_to_b = args.a_to_b;
     let curve = pool_curve(&pool_state);
     let (source, destination, iv, ov, im, om, mi, mo, real_out) = if a_to_b {
@@ -417,8 +521,7 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
     } else {
         0
     };
-    let total_bps = 125 + creator_bps;
-    let (gross_in, wanted_out) = if exact_out {
+    let (mut gross_in, wanted_out) = if exact_out {
         let out = mo.gross(specified)?;
         let effective = curve.input(
             pool_state.reserve_a.get(),
@@ -426,33 +529,26 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
             a_to_b,
             out,
         )?;
-        let mut net = gross(effective, total_bps, u64::MAX)?;
-        // separately rounded protocol and creator fees can require one additional native unit.
-        for _ in 0..4 {
-            if sub(
-                net,
-                add(fee(net, 125, u64::MAX)?, fee(net, creator_bps, u64::MAX)?)?,
-            )? >= effective
-            {
-                break;
-            }
-            net = add(net, 1)?;
-        }
-        let amount = mi.gross(net)?;
+        let amount = mi.gross(trade_gross(effective, creator_bps)?)?;
         check(amount <= limit, crate::DexError::Slippage)?;
         (amount, out)
     } else {
         (specified, 0)
     };
-    let received = token::transfer(source, im, iv, user, gross_in, mi.decimals, &[])?;
-    check(
-        received == mi.net(gross_in)?,
-        crate::DexError::InvalidAccount,
-    )?;
-    let protocol_fee = fee(received, 125, u64::MAX)?;
-    let creator_fee = fee(received, creator_bps, u64::MAX)?;
-    let trade_fee = add(protocol_fee, creator_fee)?;
-    let effective = sub(received, trade_fee)?;
+    let mut received = mi.net(gross_in)?;
+    let mut protocol_fee = fee(received, 125, u64::MAX)?;
+    let mut creator_fee = fee(received, creator_bps, u64::MAX)?;
+    let mut effective = sub(received, add(protocol_fee, creator_fee)?)?;
+    if !exact_out && pool_state.status == CURVE && !a_to_b {
+        let remaining = sub(pool_state.target_b.get(), pool_state.reserve_b.get())?;
+        if effective > remaining {
+            received = trade_gross(remaining, creator_bps)?;
+            gross_in = mi.gross(received)?;
+            protocol_fee = fee(received, 125, u64::MAX)?;
+            creator_fee = fee(received, creator_bps, u64::MAX)?;
+            effective = sub(received, add(protocol_fee, creator_fee)?)?;
+        }
+    }
     let out = if exact_out {
         check(
             curve.out(
@@ -482,13 +578,26 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
         crate::DexError::Slippage,
     )?;
     if pool_state.status == CURVE && !a_to_b {
+        let launch_supply = if pool_state.mode == MODEL {
+            MODEL_SUPPLY_ATOMS
+        } else {
+            pool_state.initial_base.get()
+        };
+        check(
+            out <= mul_div(launch_supply, 3, 4, false)?,
+            crate::DexError::BuyLimit,
+        )?;
         check(
             sub(pool_state.reserve_a.get(), out)? >= pool_state.minimum_a.get()
                 && add(pool_state.reserve_b.get(), effective)? <= pool_state.target_b.get(),
             crate::DexError::Slippage,
         )?;
     }
-    let retained = sub(received, add(protocol_fee, creator_fee)?)?;
+    check(
+        token::transfer(source, im, iv, user, gross_in, mi.decimals, &[])? == received,
+        crate::DexError::InvalidAccount,
+    )?;
+    let retained = effective;
     let bump = [pool_state.bump];
     let seed: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump];
     let actual = token::transfer(ov, om, destination, authority, out, mo.decimals, &[seed])?;
@@ -518,7 +627,6 @@ pub(crate) fn swap(accounts: &mut Trade, args: SwapArgs, exact_out: bool) -> Res
             pool_state.minimum_a.get(),
         )?;
     }
-    pool_state.started = 1;
     **pool = pool_state;
     Ok(())
 }
@@ -539,11 +647,12 @@ pub(crate) fn graduate(ctx: &mut Context<Graduate>) -> Result<()> {
     let token_b = ctx.accounts.token_b.account();
 
     let mut pool_state = **pool;
+    let clock = Clock::get()?;
     pool_state.validate(
         [mint_a, mint_b],
         [vault_a, vault_b],
         [token_a, token_b],
-        Clock::get()?.epoch,
+        clock.epoch,
     )?;
     check(
         pool_state.status == CURVE
@@ -587,9 +696,8 @@ pub(crate) fn graduate(ctx: &mut Context<Graduate>) -> Result<()> {
     pool_state.virtual_a = 0.into();
     pool_state.virtual_b = 0.into();
     pool_state.status = AMM;
-    let timestamp = Clock::get()?.unix_timestamp;
-    check(timestamp >= 0, crate::DexError::InvalidArgument)?;
-    pool_state.graduated_at = (timestamp as u64).into();
+    pool_state.price_cumulative = 0.into();
+    pool_state.price_timestamp = oracle::timestamp(&clock)?.into();
     **pool = pool_state;
     Ok(())
 }
@@ -597,6 +705,9 @@ pub(crate) fn graduate(ctx: &mut Context<Graduate>) -> Result<()> {
 pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: bool) -> Result<()> {
     let Liquidity {
         user,
+        global: _,
+        treasury,
+        system_program,
         pool,
         authority,
         token_a,
@@ -612,13 +723,15 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
         user_lp,
     } = accounts;
     let mut pool_state = **pool;
+    let clock = Clock::get()?;
     let [mint_a_state, mint_b_state] = pool_state.validate(
         [&*mint_a, &*mint_b],
         [&*vault_a, &*vault_b],
         [token_a.account(), token_b.account()],
-        Clock::get()?.epoch,
+        clock.epoch,
     )?;
     check(pool_state.status == AMM, crate::DexError::Unavailable)?;
+    oracle::accumulate(&mut pool_state, oracle::timestamp(&clock)?)?;
     token::account(user_a, false)?;
     token::account(user_b, false)?;
     let total = add(
@@ -635,10 +748,7 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
     if remove {
         let x = mul_div(pool_state.reserve_a.get(), amount, total, false)?;
         let y = mul_div(pool_state.reserve_b.get(), amount, total, false)?;
-        check(
-            x > 0 && y > 0 && x < pool_state.reserve_a.get() && y < pool_state.reserve_b.get(),
-            crate::DexError::Slippage,
-        )?;
+        check(x > 0 && y > 0 && amount <= total, crate::DexError::Slippage)?;
         anchor_spl::token::burn(
             CpiContext::new(
                 &anchor_spl::token::ID,
@@ -672,11 +782,24 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
         pool_state.reserve_a = sub(pool_state.reserve_a.get(), x)?.into();
         pool_state.reserve_b = sub(pool_state.reserve_b.get(), y)?.into();
     } else {
-        // requested LP is exact; both transfer fees are grossed up before max-input checks.
-        let x = mul_div(pool_state.reserve_a.get(), amount, total, true)?;
-        let y = mul_div(pool_state.reserve_b.get(), amount, total, true)?;
-        let gx = mint_a_state.gross(x)?;
-        let gy = mint_b_state.gross(y)?;
+        // requested lp stays exact, including an empty direct pool's initial deposits.
+        let (x, y, gx, gy) = if total == 0 {
+            check(
+                pool_state.reserve_a.get() == 0 && pool_state.reserve_b.get() == 0,
+                crate::DexError::Unavailable,
+            )?;
+            let x = mint_a_state.net(bound_a)?;
+            let y = mint_b_state.net(bound_b)?;
+            check(
+                sqrt(u128::from(x) * u128::from(y)) == amount,
+                crate::DexError::Slippage,
+            )?;
+            (x, y, bound_a, bound_b)
+        } else {
+            let x = mul_div(pool_state.reserve_a.get(), amount, total, true)?;
+            let y = mul_div(pool_state.reserve_b.get(), amount, total, true)?;
+            (x, y, mint_a_state.gross(x)?, mint_b_state.gross(y)?)
+        };
         check(gx <= bound_a && gy <= bound_b, crate::DexError::Slippage)?;
         let nx = token::transfer(
             user_a,
@@ -716,7 +839,7 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
         pool_state.reserve_b = add(pool_state.reserve_b.get(), ny)?.into();
     }
     **pool = pool_state;
-    Ok(())
+    action_fee(user, treasury, system_program)
 }
 
 pub(crate) fn collect(ctx: &mut Context<CollectFees>, args: CollectArgs) -> Result<()> {
@@ -888,104 +1011,6 @@ pub(crate) fn collect_tax(ctx: &mut Context<CollectTransferTax>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn create_vesting(ctx: &mut Context<CreateVesting>, args: VestingArgs) -> Result<()> {
-    check(
-        ctx.remaining_accounts()?.is_empty(),
-        crate::DexError::InvalidArgument,
-    )?;
-    let beneficiary = ctx.accounts.beneficiary.account();
-    let pool = &mut ctx.accounts.pool;
-    let vesting = &mut ctx.accounts.vesting;
-
-    let mut pool_state = **pool;
-    check(
-        pool_state.status == CURVE && pool_state.started == 0 && pool_state.mode != MODEL,
-        crate::DexError::Unauthorized,
-    )?;
-    let amount = args.amount;
-    let cliff = args.cliff;
-    let duration = args.duration;
-    check(
-        amount > 0
-            && cliff <= i64::MAX as u64
-            && duration <= i64::MAX as u64
-            && add(cliff, duration)? <= i64::MAX as u64,
-        crate::DexError::InvalidArgument,
-    )?;
-    let remaining = sub(pool_state.reserve_a.get(), amount)?;
-    validate_curve(
-        Curve {
-            kind: pool_state.curve_kind,
-            initial: remaining,
-            virtual_a: pool_state.virtual_a.get(),
-            virtual_b: pool_state.virtual_b.get(),
-        },
-        pool_state.target_b.get(),
-        pool_state.minimum_a.get(),
-    )?;
-    let locked = add(pool_state.vested_base.get(), amount)?;
-    vesting.pool = *pool.address();
-    vesting.beneficiary = *beneficiary.address();
-    vesting.amount = amount.into();
-    vesting.cliff = cliff.into();
-    vesting.duration = duration.into();
-    pool_state.reserve_a = remaining.into();
-    pool_state.initial_base = remaining.into();
-    pool_state.vested_base = locked.into();
-    **pool = pool_state;
-    Ok(())
-}
-
-pub(crate) fn claim_vesting(ctx: &mut Context<ClaimVesting>, minimum_output: u64) -> Result<()> {
-    check(
-        ctx.remaining_accounts()?.is_empty(),
-        crate::DexError::InvalidArgument,
-    )?;
-    let pool = &mut ctx.accounts.pool;
-    let vesting = &mut ctx.accounts.vesting;
-    let authority = ctx.accounts.authority.account();
-    let mint = &ctx.accounts.mint;
-    let vault = &mut ctx.accounts.vault;
-    let destination = &mut ctx.accounts.destination;
-    let token = ctx.accounts.token.account();
-
-    let pool_state = **pool;
-    check(pool_state.status == AMM, crate::DexError::Unavailable)?;
-    let clock = Clock::get()?;
-    check(clock.unix_timestamp >= 0, crate::DexError::InvalidArgument)?;
-    let start = add(pool_state.graduated_at.get(), vesting.cliff.get())?;
-    let now = clock.unix_timestamp as u64;
-    check(now >= start, crate::DexError::Unavailable)?;
-    let total = vesting.amount.get();
-    let duration = vesting.duration.get();
-    let vested = if duration == 0 {
-        total
-    } else {
-        mul_div(total, (now - start).min(duration), duration, false)?
-    };
-    let amount = sub(vested, vesting.vested.get())?;
-    check(amount > 0, crate::DexError::InvalidArgument)?;
-    let remaining = sub(pool_state.vested_base.get(), amount)?;
-    let mint_state = token::mint(mint, token, clock.epoch, false)?;
-    token::account(vault, true)?;
-    token::account(destination, false)?;
-    let bump = [pool_state.bump];
-    let seed: &[&[u8]] = &[b"authority", pool.address().as_ref(), &bump];
-    let net = token::transfer(
-        vault,
-        mint,
-        destination,
-        authority,
-        amount,
-        mint_state.decimals,
-        &[seed],
-    )?;
-    check(net >= minimum_output, crate::DexError::Slippage)?;
-    vesting.vested = vested.into();
-    pool.vested_base = remaining.into();
-    Ok(())
-}
-
 pub(crate) fn initialize_global(
     ctx: &mut Context<InitializeGlobal>,
     config: GlobalConfig,
@@ -994,18 +1019,21 @@ pub(crate) fn initialize_global(
         ctx.remaining_accounts()?.is_empty(),
         crate::DexError::InvalidArgument,
     )?;
-    let mut admin = *ctx.accounts.admin.account();
-    let admin = &mut admin;
+    let council = &ctx.accounts.council;
     let global = &mut ctx.accounts.global;
     use anchor_lang::prelude::Address;
 
     check(
-        config.treasury != Address::default() && config.distributor != Address::default(),
+        config.treasury != Address::default()
+            && config.distributor != Address::default()
+            && config.usdc_mint != Address::default()
+            && config.treasury != *ctx.accounts.council.address(),
         crate::DexError::InvalidArgument,
     )?;
-    global.admin = *admin.address();
+    global.council = *council.address();
     global.treasury = config.treasury;
     global.distributor = config.distributor;
+    global.usdc_mint = config.usdc_mint;
     Ok(())
 }
 
@@ -1015,11 +1043,14 @@ pub(crate) fn update_global(ctx: &mut Context<UpdateGlobal>, config: GlobalConfi
         crate::DexError::InvalidArgument,
     )?;
     check(
-        config.treasury != Address::default() && config.distributor != Address::default(),
+        config.treasury != Address::default()
+            && config.distributor != Address::default()
+            && config.usdc_mint == ctx.accounts.global.usdc_mint
+            && config.treasury != *ctx.accounts.new_council.address(),
         crate::DexError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    accounts.global.admin = *accounts.new_admin.address();
+    accounts.global.council = *accounts.new_council.address();
     accounts.global.treasury = config.treasury;
     accounts.global.distributor = config.distributor;
     Ok(())
@@ -1037,12 +1068,31 @@ pub(crate) fn update_config(ctx: &mut Context<UpdateConfig>, enabled: bool) -> R
         Clock::get()?.epoch,
         true,
     )?;
-    accounts.config.admin = *accounts.admin.address();
+    accounts.config.council = *accounts.council.address();
     accounts.config.quote_mint = *accounts.mint.address();
     accounts.config.treasury = accounts.global.treasury;
     accounts.config.distributor = accounts.global.distributor;
+    if accounts.config.enabled == 0 && enabled {
+        accounts.config.oracle_timestamp = 0.into();
+        accounts.config.quote_per_usdc_x32 = 0.into();
+        accounts.config.quote_price_timestamp = 0.into();
+        accounts.config.oracle_cumulative = 0.into();
+    }
     accounts.config.enabled = u8::from(enabled);
     Ok(())
+}
+
+pub(crate) fn refresh_quote(ctx: &mut Context<RefreshQuote>) -> Result<()> {
+    check(
+        ctx.remaining_accounts()?.is_empty(),
+        crate::DexError::InvalidArgument,
+    )?;
+    check(
+        ctx.accounts.config.enabled == 1,
+        crate::DexError::Unauthorized,
+    )?;
+    let now = oracle::timestamp(&Clock::get()?)?;
+    oracle::refresh(&mut ctx.accounts.config, &ctx.accounts.reference_pool, now)
 }
 
 pub(crate) fn update_recipients(ctx: &mut Context<UpdateRecipients>) -> Result<()> {
@@ -1055,4 +1105,82 @@ pub(crate) fn update_recipients(ctx: &mut Context<UpdateRecipients>) -> Result<(
     pool.treasury = global.treasury;
     pool.distributor = global.distributor;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_preset_retains_liquidity_and_price_matched_graduation() {
+        for target in [1, 3] {
+            assert!(public_curve(target).is_err());
+        }
+        for target in [
+            1_000,
+            10_000,
+            1_000_000,
+            PUBLIC_RAISE_USDC_ATOMS,
+            1_000_000_000_000,
+        ] {
+            let curve = public_curve(target).unwrap();
+            validate_curve(curve, target, PUBLIC_LIQUIDITY_ATOMS).unwrap();
+            let sold = curve.out(curve.initial, 0, false, target).unwrap();
+            assert!(sold <= PUBLIC_CURVE_SALE_ATOMS);
+            let remaining = curve.initial - sold;
+            assert!(remaining >= PUBLIC_LIQUIDITY_ATOMS);
+            let (price_numerator, price_denominator) = curve.price(remaining, target).unwrap();
+            let matched = mul_div(target, price_denominator, price_numerator, true).unwrap();
+            assert!(matched <= remaining);
+        }
+    }
+
+    #[test]
+    fn model_preset_doubles_spot_price_with_only_graduation_dust() {
+        let curve = Curve {
+            initial: MODEL_CURVE_SUPPLY_ATOMS,
+            virtual_a: MODEL_CURVE_SUPPLY_ATOMS,
+            virtual_b: MODEL_VIRTUAL_USDC_ATOMS,
+        };
+        validate_curve(curve, MODEL_RAISE_USDC_ATOMS, MODEL_MINIMUM_BASE_ATOMS).unwrap();
+        let sold = curve
+            .out(curve.initial, 0, false, MODEL_RAISE_USDC_ATOMS)
+            .unwrap();
+        let remaining = curve.initial - sold;
+        assert_eq!(sold, 52_720_779_386_314);
+        assert_eq!(remaining, 37_279_220_613_686);
+        let (end_numerator, end_denominator) =
+            curve.price(remaining, MODEL_RAISE_USDC_ATOMS).unwrap();
+        let matched =
+            mul_div(MODEL_RAISE_USDC_ATOMS, end_denominator, end_numerator, true).unwrap();
+        assert_eq!(remaining - matched, 151);
+        let (start_numerator, start_denominator) = curve.price(curve.initial, 0).unwrap();
+        let twice_opening = 2 * u128::from(start_numerator) * u128::from(end_denominator);
+        let terminal = u128::from(end_numerator) * u128::from(start_denominator);
+        assert!(terminal <= twice_opening);
+        assert!(twice_opening - terminal < twice_opening / 1_000_000_000);
+    }
+
+    #[test]
+    fn terminal_input_preserves_exact_net_with_both_trade_fees_and_transfer_tax() {
+        for creator_bps in [0, 50] {
+            for effective in [1, 2, 39, 40, 79, 80, 399, 400, 999, 10_000, 1_000_000] {
+                let received = trade_gross(effective, creator_bps).unwrap();
+                assert_eq!(
+                    received
+                        - fee(received, 125, u64::MAX).unwrap()
+                        - fee(received, creator_bps, u64::MAX).unwrap(),
+                    effective
+                );
+                for fee_bps in [0, 100, 300, 9999] {
+                    let mint = token::Mint {
+                        fee_bps,
+                        fee_cap: 1_000,
+                        ..token::Mint::default()
+                    };
+                    assert_eq!(mint.net(mint.gross(received).unwrap()).unwrap(), received);
+                }
+            }
+        }
+    }
 }

@@ -119,7 +119,7 @@ pub fn curve_mint(
 pub fn account(account: &InterfaceAccount<TokenAccount>, vault: bool) -> Result<u64> {
     if vault {
         check(
-            !account.has_delegate() && !account.has_close_authority() && !account.is_native(),
+            !account.has_delegate() && !account.has_close_authority(),
             crate::DexError::InvalidAccount,
         )?;
     }

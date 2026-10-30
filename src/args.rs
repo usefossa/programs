@@ -91,36 +91,48 @@ pub struct ListFees {
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct ListInit {
     pub limit: u32,
-    pub fees: Option<ListFees>,
+    pub fees: ListFees,
     pub maximum_payment: u64,
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct FeeConfig {
-    pub treasury: Address,
-    pub treasury2: Address,
+    pub bank: Address,
     pub creation_mint: Address,
     pub creation_token_program: Address,
     pub creation_net_price: u64,
     pub creation_enabled: bool,
 }
 
-#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
-pub struct ModelCurve {
-    pub supply: u64,
-    pub virtual_a: u64,
-    pub virtual_b: u64,
-    pub target_b: u64,
-    pub minimum_a: u64,
-}
-
-#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
-pub struct ReserveActivation {
-    pub supply: u64,
-    pub decimals: u8,
+#[derive(Clone, IdlType, AnchorDeserialize, AnchorSerialize)]
+pub struct GroupInit {
     pub tax_bps: u16,
     pub maximum_tax: u64,
-    pub curve: ModelCurve,
+    pub metadata: TokenMetadata,
+}
+
+#[derive(Clone, IdlType, AnchorDeserialize, AnchorSerialize)]
+pub struct TokenMetadata {
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+}
+
+impl TokenMetadata {
+    pub fn validate(&self) -> ProgramResult {
+        crate::helpers::require(
+            (1..=32).contains(&self.name.len())
+                && (1..=10).contains(&self.symbol.len())
+                && (1..=URI_MAX).contains(&self.uri.len())
+                && !self.name.bytes().any(|byte| byte.is_ascii_control())
+                && !self.symbol.bytes().any(|byte| byte.is_ascii_control())
+                && !self
+                    .uri
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+            crate::RouterError::InvalidArgument,
+        )
+    }
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]

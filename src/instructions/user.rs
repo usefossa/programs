@@ -69,12 +69,12 @@ pub(crate) fn withdraw(
     require(amount > 0, crate::RouterError::InvalidArgument)?;
     let balance = sub(accounts.user.free.get(), amount)?;
     user_transfer(
-        [
-            accounts.vault.account(),
-            accounts.mint.account(),
-            accounts.destination.account(),
-            accounts.authority.account(),
-        ],
+        (
+            accounts.vault.try_to_cpi_handle_mut()?,
+            accounts.mint.to_cpi_handle(),
+            accounts.destination.try_to_cpi_handle_mut()?,
+            accounts.authority.to_cpi_handle(),
+        ),
         accounts.user.address(),
         accounts.user.bump,
         ctx.program_id,

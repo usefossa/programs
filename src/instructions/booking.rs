@@ -8,9 +8,9 @@ use crate::{
     CLAIM_SECONDS,
 };
 use anchor_lang::accounts::Slab;
-use anchor_lang::prelude::{Account, Clock, ProgramError, ProgramResult};
+use anchor_lang::prelude::{Account, Address, Clock, ProgramError, ProgramResult};
 use anchor_lang::solana_program::sysvar::Sysvar as _;
-use anchor_lang::{AccountClose, AnchorAccount};
+use anchor_lang::{AccountClose, AnchorAccount, ToCpiHandle, ToCpiHandleMut};
 
 fn capacity<'a>(
     book: &'a mut Slab<Capacity, CapacityEntry>,
@@ -54,11 +54,19 @@ pub(crate) fn reserve(
     super::list::state(&accounts.list)?;
     let fee_bps = accounts.list.fee_bps.get();
     let protocol_share = accounts.list.protocol_share.get();
-    if fee_bps > 0 {
-        super::fees::validate_terms(fee_bps, protocol_share)?;
-    } else {
-        require(protocol_share == 0, crate::RouterError::InvalidAccount)?;
-    }
+    super::fees::validate_terms(fee_bps, protocol_share)?;
+    require(
+        accounts.group.is_some() == (accounts.model.group != Address::default()),
+        crate::RouterError::InvalidAccount,
+    )?;
+    let reserve = accounts
+        .group
+        .as_ref()
+        .filter(|group| group.route_to_reserve == 1);
+    let reserve_authority = reserve.map(|group| *group.address()).unwrap_or_default();
+    let protocol_destination = reserve
+        .map(|group| group.backing_vault)
+        .unwrap_or(accounts.market.council);
     let mut request_state = request.validate(accounts.user.free.get())?;
     request_state.spend = fee_budget(request_state.spend, fee_bps);
     let mut chosen = select(
@@ -90,7 +98,7 @@ pub(crate) fn reserve(
         .unix_timestamp
         .checked_add(claim_seconds)
         .ok_or(crate::RouterError::Arithmetic)?;
-    let reserve_destination = accounts.model.route_to_reserve == 1;
+    let reserve_destination = reserve.is_some();
     accounts.booking.owner = *accounts.owner.address();
     accounts.booking.provider = terms.provider;
     accounts.booking.market = *accounts.market.address();
@@ -123,11 +131,8 @@ pub(crate) fn reserve(
     accounts.booking.reserved5 = 0;
     accounts.booking.estimated_score = chosen.score.into();
     accounts.booking.creator = accounts.list.authority;
-    accounts.booking.protocol_destination = if reserve_destination {
-        accounts.model.backing_vault
-    } else {
-        accounts.market.treasury
-    };
+    accounts.booking.protocol_destination = protocol_destination;
+    accounts.booking.reserve_authority = reserve_authority;
     accounts.booking.fee_bps = fee_bps.into();
     accounts.booking.protocol_share = protocol_share.into();
     accounts.booking.reserve_destination = u8::from(reserve_destination);
@@ -172,21 +177,23 @@ pub(crate) fn claim(
         },
         crate::RouterError::InvalidState,
     )?;
-    vault_owned_by(
-        accounts.vault.account(),
-        accounts.mint.address(),
-        accounts.authority.address(),
-    )?;
     if !destinations.is_empty() {
         super::fees::validate_terms(
             accounts.booking.fee_bps.get(),
             accounts.booking.protocol_share.get(),
         )?;
-        token_owned_by(
-            &destinations[0],
-            accounts.mint.address(),
-            &accounts.booking.creator,
-        )?;
+        let destination_owner = |destination: &anchor_lang::prelude::AccountView,
+                                 owner: &Address| {
+            if destination.address() == accounts.payout.address() {
+                require(
+                    accounts.payout.owner() == owner,
+                    crate::RouterError::InvalidAccount,
+                )
+            } else {
+                token_owned_by(destination, accounts.mint.address(), owner)
+            }
+        };
+        destination_owner(&destinations[0], &accounts.booking.creator)?;
         if accounts.booking.reserve_destination == 1 {
             require(
                 accounts.booking.protocol_destination == *destinations[1].address(),
@@ -195,14 +202,10 @@ pub(crate) fn claim(
             vault_owned_by(
                 &destinations[1],
                 accounts.mint.address(),
-                accounts.model.address(),
+                &accounts.booking.reserve_authority,
             )?;
         } else {
-            token_owned_by(
-                &destinations[1],
-                accounts.mint.address(),
-                &accounts.booking.protocol_destination,
-            )?;
+            destination_owner(&destinations[1], &accounts.booking.protocol_destination)?;
         }
     }
     let uncached = claim.uncached;
@@ -233,16 +236,28 @@ pub(crate) fn claim(
     let capacity = capacity(&mut accounts.capacity, accounts.booking.slot.get())?;
     capacity.active = dec(capacity.active.get())?.into();
     if !destinations.is_empty() {
+        let payout = accounts.payout.try_to_cpi_handle_mut()?;
+        let (creator, protocol) = destinations.split_at_mut(1);
+        let creator = if creator[0].address() == payout.address() {
+            payout
+        } else {
+            creator[0].try_to_cpi_handle_mut()?
+        };
+        let protocol = if protocol[0].address() == payout.address() {
+            payout
+        } else {
+            protocol[0].try_to_cpi_handle_mut()?
+        };
         user_payments(
+            (
+                accounts.vault.try_to_cpi_handle_mut()?,
+                accounts.mint.to_cpi_handle(),
+                accounts.authority.to_cpi_handle(),
+            ),
             [
-                accounts.vault.account(),
-                accounts.mint.account(),
-                accounts.authority.account(),
-            ],
-            [
-                (accounts.payout.account(), provider_charge),
-                (&destinations[0], creator_fee),
-                (&destinations[1], protocol_fee),
+                (payout, provider_charge),
+                (creator, creator_fee),
+                (protocol, protocol_fee),
             ],
             accounts.user.address(),
             accounts.user.bump,
@@ -250,12 +265,12 @@ pub(crate) fn claim(
         )?;
     } else if provider_charge > 0 {
         user_transfer(
-            [
-                accounts.vault.account(),
-                accounts.mint.account(),
-                accounts.payout.account(),
-                accounts.authority.account(),
-            ],
+            (
+                accounts.vault.try_to_cpi_handle_mut()?,
+                accounts.mint.to_cpi_handle(),
+                accounts.payout.try_to_cpi_handle_mut()?,
+                accounts.authority.to_cpi_handle(),
+            ),
             accounts.user.address(),
             accounts.user.bump,
             ctx.program_id,

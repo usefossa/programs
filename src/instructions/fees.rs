@@ -10,15 +10,15 @@ const MIN_LIST_FEE_BPS: u16 = 10;
 const MAX_LIST_FEE_BPS: u16 = 300;
 const MIN_PROTOCOL_SHARE_BPS: u16 = 5000;
 
-pub(crate) fn rotate_admin(
-    ctx: &mut anchor_lang::Context<crate::contexts::RotateAdmin>,
+pub(crate) fn rotate_council(
+    ctx: &mut anchor_lang::Context<crate::contexts::RotateCouncil>,
 ) -> ProgramResult {
     require(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    accounts.market.admin = *accounts.next.address();
+    accounts.market.council = *accounts.next.address();
     Ok(())
 }
 
@@ -38,7 +38,7 @@ pub(crate) fn configure(
     let extra = remaining.as_mut_slice();
     let accounts = &mut ctx.accounts;
     require(
-        config.treasury != Address::default() && config.treasury2 != Address::default(),
+        config.bank != Address::default(),
         crate::RouterError::InvalidArgument,
     )?;
     require(
@@ -54,8 +54,7 @@ pub(crate) fn configure(
         )?;
         payment_mint(&extra[0], extra[1].address())?;
     }
-    accounts.market.treasury = config.treasury;
-    accounts.market.treasury2 = config.treasury2;
+    accounts.market.bank = config.bank;
     accounts.market.creation_mint = config.creation_mint;
     accounts.market.creation_token_program = config.creation_token_program;
     accounts.market.creation_net_price = config.creation_net_price.into();
@@ -72,7 +71,8 @@ pub(crate) fn configure_dex(
     )?;
     let accounts = &mut ctx.accounts;
     require(
-        accounts.config.admin == accounts.market.admin
+        accounts.global.council == accounts.market.council
+            && accounts.global.usdc_mint == accounts.market.mint
             && accounts.config.quote_mint == accounts.market.mint,
         crate::RouterError::InvalidAccount,
     )?;
@@ -103,9 +103,12 @@ pub(crate) fn creation_payment(
     accounts: &[AccountView],
     maximum: u64,
 ) -> ProgramResult {
-    if market.creation_enabled == 0 {
-        return require(accounts.is_empty(), crate::RouterError::InvalidArgument);
-    }
+    require(
+        market.creation_enabled == 1
+            && market.creation_mint != Address::default()
+            && market.creation_net_price.get() > 0,
+        crate::RouterError::Unavailable,
+    )?;
     let [source, destination, mint, token] = accounts else {
         return Err(crate::RouterError::InvalidArgument.into());
     };
@@ -121,7 +124,7 @@ pub(crate) fn creation_payment(
     let before = payment_token(
         destination,
         mint.address(),
-        &market.treasury,
+        &market.council,
         token.address(),
     )?;
     payment_token(source, mint.address(), authority.address(), token.address())?;
@@ -137,7 +140,7 @@ pub(crate) fn creation_payment(
     let after = payment_token(
         destination,
         mint.address(),
-        &market.treasury,
+        &market.council,
         token.address(),
     )?;
     require(

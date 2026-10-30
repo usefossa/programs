@@ -33,24 +33,9 @@ pub(crate) fn initialize(
     let payment = remaining.as_mut_slice();
     let accounts = &mut ctx.accounts;
     let authority = accounts.authority.account();
-    let configured = accounts.market.creation_enabled == 1;
-    require(
-        config.fees.is_some() == configured,
-        crate::RouterError::InvalidArgument,
-    )?;
-    let (fee_bps, protocol_share) = if let Some(fees) = config.fees {
-        super::fees::validate_terms(fees.fee_bps, fees.protocol_share)?;
-        super::fees::creation_payment(
-            &accounts.market,
-            authority,
-            payment,
-            config.maximum_payment,
-        )?;
-        (fees.fee_bps, fees.protocol_share)
-    } else {
-        require(payment.is_empty(), crate::RouterError::InvalidArgument)?;
-        (0, 0)
-    };
+    let fees = config.fees;
+    super::fees::validate_terms(fees.fee_bps, fees.protocol_share)?;
+    super::fees::creation_payment(&accounts.market, authority, payment, config.maximum_payment)?;
     let limit = config.limit as usize;
     require(
         (1..=MAX_ENTRIES).contains(&limit)
@@ -60,8 +45,8 @@ pub(crate) fn initialize(
     accounts.list.market = *accounts.market.address();
     accounts.list.authority = *authority.address();
     accounts.list.limit = (limit as u32).into();
-    accounts.list.fee_bps = fee_bps.into();
-    accounts.list.protocol_share = protocol_share.into();
+    accounts.list.fee_bps = fees.fee_bps.into();
+    accounts.list.protocol_share = fees.protocol_share.into();
     Ok(())
 }
 

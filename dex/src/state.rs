@@ -41,11 +41,8 @@ impl Pool {
         check(
             balance_a
                 >= add(
-                    add(
-                        self.reserve_a.get(),
-                        add(self.protocol_a.get(), self.creator_a.get())?,
-                    )?,
-                    add(self.vested_base.get(), self.locked_base.get())?,
+                    self.reserve_a.get(),
+                    add(self.protocol_a.get(), self.creator_a.get())?,
                 )?
                 && balance_b
                     >= add(

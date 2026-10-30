@@ -14,7 +14,7 @@ pub(crate) fn initialize(
         accounts.mint.is_initialized() && accounts.mint.decimals() == 6,
         crate::RouterError::InvalidAccount,
     )?;
-    accounts.market.admin = *accounts.admin.address();
+    accounts.market.council = *accounts.council.address();
     accounts.market.mint = *accounts.mint.address();
     Ok(())
 }

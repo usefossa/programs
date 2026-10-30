@@ -3,7 +3,9 @@ use anchor_lang::prelude::Clock;
 use anchor_lang::prelude::{AccountView, Address, InterfaceAccount, ProgramResult};
 #[allow(unused_imports)]
 use anchor_lang::solana_program::sysvar::Sysvar as _;
-use anchor_lang::{AnchorAccount, CpiContext, ToCpiHandle, ToCpiHandleMut};
+use anchor_lang::{
+    AnchorAccount, CpiContext, CpiHandle, CpiHandleMut, ToCpiHandle, ToCpiHandleMut,
+};
 use anchor_spl::{
     extensions::TransferFeeConfig,
     token_interface::{
@@ -89,21 +91,33 @@ pub(crate) fn payment_token(
     owner: &Address,
     token: &Address,
 ) -> Result<u64, anchor_lang::prelude::ProgramError> {
+    payment_account(
+        &InterfaceAccount::<TokenAccount>::load(*account)?,
+        mint,
+        owner,
+        token,
+    )
+}
+
+pub(crate) fn payment_account(
+    account: &InterfaceAccount<TokenAccount>,
+    mint: &Address,
+    owner: &Address,
+    token: &Address,
+) -> Result<u64, anchor_lang::prelude::ProgramError> {
     require(
         (token == &anchor_spl::token::ID || token == &anchor_spl::token_2022::ID)
-            && account.owner() == token,
+            && account.account().owner() == token,
         crate::RouterError::InvalidAccount,
     )?;
-    let token_account = InterfaceAccount::<TokenAccount>::load(*account)?;
     require(
-        token_account.mint() == mint
-            && token_account.owner() == owner
-            && !token_account.is_frozen(),
+        account.mint() == mint && account.owner() == owner && !account.is_frozen(),
         crate::RouterError::InvalidAccount,
     )?;
     if token == &anchor_spl::token_2022::ID {
-        let data = account.try_borrow()?;
-        let state = PodStateWithExtensions::<PodAccount>::unpack(&data)?;
+        // the typed account owns its borrow; this sdk read cannot outlive the shared reference.
+        let data = unsafe { account.account().borrow_unchecked() };
+        let state = PodStateWithExtensions::<PodAccount>::unpack(data)?;
         require(
             state.get_extension_types()?.iter().all(|extension| {
                 matches!(
@@ -114,7 +128,7 @@ pub(crate) fn payment_token(
             crate::RouterError::InvalidAccount,
         )?;
     }
-    Ok(token_account.amount())
+    Ok(account.amount())
 }
 
 pub(crate) fn payment_transfer(
@@ -169,14 +183,19 @@ pub(crate) fn vault_owned_by(
         crate::RouterError::InvalidAccount,
     )
 }
-pub(crate) fn user_transfer(
-    accounts: [&AccountView; 4],
+pub(crate) fn user_transfer<'a>(
+    accounts: (
+        CpiHandleMut<'a>,
+        CpiHandle<'a>,
+        CpiHandleMut<'a>,
+        CpiHandle<'a>,
+    ),
     lane: &Address,
     bump: u8,
     program: &Address,
     amount: u64,
 ) -> ProgramResult {
-    let [from, mint, to, authority] = accounts;
+    let (from, mint, to, authority) = accounts;
     require(
         authority.address()
             == &Address::derive_address(&[b"vault", lane.as_ref()], Some(bump), program),
@@ -184,15 +203,14 @@ pub(crate) fn user_transfer(
     )?;
     let bump_ref = [bump];
     let signer_seeds: &[&[u8]] = &[b"vault", lane.as_ref(), &bump_ref];
-    let (mut from, mut to) = (*from, *to);
     anchor_spl::token::transfer_checked(
         CpiContext::new_with_signer(
             &anchor_spl::token::ID,
             anchor_spl::token::TransferChecked {
-                from: from.try_to_cpi_handle_mut()?,
-                mint: mint.to_cpi_handle(),
-                to: to.try_to_cpi_handle_mut()?,
-                authority: authority.to_cpi_handle(),
+                from,
+                mint,
+                to,
+                authority,
             },
             &[signer_seeds],
         ),
@@ -200,14 +218,14 @@ pub(crate) fn user_transfer(
         6,
     )
 }
-pub(crate) fn user_payments(
-    accounts: [&AccountView; 3],
-    mut payments: [(&AccountView, u64); 3],
+pub(crate) fn user_payments<'a>(
+    accounts: (CpiHandleMut<'a>, CpiHandle<'a>, CpiHandle<'a>),
+    mut payments: [(CpiHandleMut<'a>, u64); 3],
     lane: &Address,
     bump: u8,
     program: &Address,
 ) -> ProgramResult {
-    let [from, mint, authority] = accounts;
+    let (from, mint, authority) = accounts;
     require(
         authority.address()
             == &Address::derive_address(&[b"vault", lane.as_ref()], Some(bump), program),
@@ -223,15 +241,14 @@ pub(crate) fn user_payments(
             }
         }
         if payments[i].1 > 0 {
-            let (mut from, mut to) = (*from, *payments[i].0);
             anchor_spl::token::transfer_checked(
                 CpiContext::new_with_signer(
                     &anchor_spl::token::ID,
                     anchor_spl::token::TransferChecked {
-                        from: from.try_to_cpi_handle_mut()?,
-                        mint: mint.to_cpi_handle(),
-                        to: to.try_to_cpi_handle_mut()?,
-                        authority: authority.to_cpi_handle(),
+                        from,
+                        mint,
+                        to: payments[i].0,
+                        authority,
                     },
                     &[signer_seeds],
                 ),

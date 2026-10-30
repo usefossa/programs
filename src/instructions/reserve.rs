@@ -1,8 +1,8 @@
 use crate::{
-    args::{Redeem, ReserveActivation, ReserveConfig},
+    args::{GroupInit, Redeem, ReserveConfig, TokenMetadata},
     helpers::require,
-    state_types::Model,
-    token::payment_token,
+    state_types::ModelGroup,
+    token::payment_account,
 };
 use anchor_lang::prelude::*;
 use anchor_lang::{AnchorAccount, CpiContext, ToCpiHandle, ToCpiHandleMut};
@@ -11,89 +11,111 @@ use anchor_spl::{
     token_2022_extensions as fees,
     token_interface::{self as spl, Mint, TokenInterfaceAccountExtensions},
 };
-use spl::spl_token_2022::instruction::AuthorityType;
+use fossa_dex::{MODEL_CURVE_SUPPLY_ATOMS, MODEL_TOKEN_DECIMALS, MODEL_TREASURY_ATOMS};
+use spl::spl_token_2022::{
+    extension::{BaseStateWithExtensions, ExtensionType, PodStateWithExtensions},
+    instruction::AuthorityType,
+    pod::PodMint,
+};
+use spl_token_metadata_interface::state::TokenMetadata as MetadataState;
 
-fn initialize_pda(
-    account: &AccountView,
-    payer: &AccountView,
-    program: &Address,
-    len: usize,
-    signer: &[&[u8]],
-) -> ProgramResult {
-    anchor_lang::create_account_signed(payer, account, len, program, signer)
+pub const REDEMPTION_FEE: u64 = 25_000_000;
+
+fn fund_rent(payer: &mut Signer, account: &mut impl AnchorAccount, len: usize) -> ProgramResult {
+    let amount = Rent::get()?
+        .try_minimum_balance(len)?
+        .saturating_sub(account.account().lamports());
+    if amount == 0 {
+        return Ok(());
+    }
+    anchor_lang::system_program::transfer(
+        CpiContext::new(
+            &anchor_lang::system_program::ID,
+            anchor_lang::system_program::Transfer {
+                from: payer.try_to_cpi_handle_mut()?,
+                to: account.try_cpi_handle_mut()?,
+            },
+        ),
+        amount,
+    )
 }
 
-fn mint_state(mint: &InterfaceAccount<Mint>, model: &Account<Model>) -> ProgramResult {
+fn mint_state(mint: &InterfaceAccount<Mint>, group: &Account<ModelGroup>) -> ProgramResult {
     let config = mint.get_extension::<TransferFeeConfig>()?;
     require(
         mint.mint_authority().is_none()
             && mint.freeze_authority().is_none()
-            && config.transfer_fee_config_authority == *model.address()
-            && config.withdraw_withheld_authority == *model.address(),
+            && config.transfer_fee_config_authority == *group.address()
+            && config.withdraw_withheld_authority == *group.address(),
         crate::RouterError::InvalidAccount,
     )
 }
 
 fn reserve_accounts(
-    model: &Account<Model>,
+    group: &Account<ModelGroup>,
     mint: &InterfaceAccount<Mint>,
     backing: &Account<anchor_spl::token::TokenAccount>,
     quote: &Account<anchor_spl::mint::Mint>,
 ) -> Result<(Address, u8)> {
-    mint_state(mint, model)?;
+    mint_state(mint, group)?;
     require(
         backing.mint() == quote.address()
-            && backing.owner() == model.address()
+            && backing.owner() == group.address()
             && !backing.has_delegate()
             && !backing.has_close_authority()
             && !backing.is_native(),
         crate::RouterError::InvalidAccount,
     )?;
-    Ok((model.model_id, model.bump))
+    Ok((group.group_id, group.bump))
 }
 
-pub(crate) fn activate(
-    ctx: &mut anchor_lang::Context<crate::contexts::ActivateReserve>,
-    config: &ReserveActivation,
+pub(crate) fn initialize_group(
+    ctx: &mut anchor_lang::Context<crate::contexts::InitializeModelGroup>,
+    group_id: Address,
+    config: &GroupInit,
 ) -> ProgramResult {
     require(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
+    config.metadata.validate()?;
     require(
-        config.supply > 0
-            && config.tax_bps <= 10_000
-            && config.curve.supply > 0
-            && config.curve.supply <= config.supply,
+        config.tax_bps <= 10_000,
         crate::RouterError::InvalidArgument,
     )?;
+    let token_len =
+        ExtensionType::try_calculate_account_len::<spl::spl_token_2022::state::Account>(&[
+            ExtensionType::TransferFeeAmount,
+        ])?;
     require(
-        accounts.model.route_to_reserve == 0
-            && accounts.model.backing_vault == Address::default()
-            && accounts.model.fixed_token_mint == Address::default(),
-        crate::RouterError::InvalidState,
+        accounts.council_tokens.data_len() == token_len
+            && accounts.curve_base_vault.data_len() == token_len,
+        crate::RouterError::InvalidAccount,
     )?;
-    let model_id = accounts.model.model_id;
-    let model_bump = [accounts.model.bump];
-    let model_seeds: &[&[u8]] = &[
-        b"model",
+    let group_bump = [ctx.bumps.group];
+    let group_seeds: &[&[u8]] = &[
+        b"model_group",
         accounts.market.address().as_ref(),
-        model_id.as_ref(),
-        &model_bump,
+        group_id.as_ref(),
+        &group_bump,
     ];
-    let mint_bump = ctx.bumps.mint;
-    let mint_bump = [mint_bump];
+    let mint_bump = [ctx.bumps.mint];
     let mint_seeds: &[&[u8]] = &[
         b"reserve_mint",
-        accounts.model.address().as_ref(),
+        accounts.group.address().as_ref(),
         &mint_bump,
     ];
-    initialize_pda(
-        accounts.mint.account(),
+    let mint_len =
+        ExtensionType::try_calculate_account_len::<spl::spl_token_2022::state::Mint>(&[
+            ExtensionType::TransferFeeConfig,
+            ExtensionType::MetadataPointer,
+        ])?;
+    anchor_lang::create_account_signed(
         accounts.payer.account(),
+        accounts.mint.account(),
+        mint_len,
         &anchor_spl::token_2022::ID,
-        278,
         mint_seeds,
     )?;
     fees::transfer_fee_initialize(
@@ -103,10 +125,21 @@ pub(crate) fn activate(
                 mint: accounts.mint.try_to_cpi_handle_mut()?,
             },
         ),
-        Some(accounts.model.address()),
-        Some(accounts.model.address()),
+        Some(accounts.group.address()),
+        Some(accounts.group.address()),
         config.tax_bps,
         config.maximum_tax,
+    )?;
+    let mint_address = *accounts.mint.address();
+    fees::metadata_pointer_initialize(
+        CpiContext::new(
+            &anchor_spl::token_2022::ID,
+            fees::MetadataPointerInitialize {
+                mint: accounts.mint.try_to_cpi_handle_mut()?,
+            },
+        ),
+        None,
+        Some(&mint_address),
     )?;
     spl::initialize_mint2(
         CpiContext::new(
@@ -115,24 +148,46 @@ pub(crate) fn activate(
                 mint: accounts.mint.try_to_cpi_handle_mut()?,
             },
         ),
-        config.decimals,
-        accounts.model.address(),
+        MODEL_TOKEN_DECIMALS,
+        accounts.group.address(),
         None,
     )?;
-    spl::initialize_account3(CpiContext::new(
-        &anchor_spl::token::ID,
-        spl::InitializeAccount3 {
-            account: accounts.backing.try_to_cpi_handle_mut()?,
-            mint: accounts.quote.to_cpi_handle(),
-            authority: accounts.model.to_cpi_handle(),
-        },
-    ))?;
+    let metadata = MetadataState {
+        update_authority: Some(*accounts.group.address()).try_into()?,
+        mint: mint_address,
+        name: config.metadata.name.clone(),
+        symbol: config.metadata.symbol.clone(),
+        uri: config.metadata.uri.clone(),
+        additional_metadata: alloc::vec::Vec::new(),
+    };
+    let metadata_len = {
+        let data = accounts.mint.try_borrow()?;
+        PodStateWithExtensions::<PodMint>::unpack(&data)?
+            .try_get_new_account_len_for_variable_len_extension(&metadata)?
+    };
+    fund_rent(&mut accounts.payer, &mut accounts.mint, metadata_len)?;
+    let mint = accounts.mint.try_to_cpi_handle_mut()?;
+    fees::token_metadata_initialize(
+        CpiContext::new_with_signer(
+            &anchor_spl::token_2022::ID,
+            fees::TokenMetadataInitialize {
+                metadata: mint,
+                update_authority: accounts.group.to_cpi_handle(),
+                mint: mint.into_readonly(),
+                mint_authority: accounts.group.to_cpi_handle(),
+            },
+            &[group_seeds],
+        ),
+        metadata.name,
+        metadata.symbol,
+        metadata.uri,
+    )?;
     spl::initialize_account3(CpiContext::new(
         &anchor_spl::token_2022::ID,
         spl::InitializeAccount3 {
-            account: accounts.allocation.try_to_cpi_handle_mut()?,
+            account: accounts.council_tokens.try_to_cpi_handle_mut()?,
             mint: accounts.mint.to_cpi_handle(),
-            authority: accounts.curve_payer.to_cpi_handle(),
+            authority: accounts.council.to_cpi_handle(),
         },
     ))?;
     spl::initialize_account3(CpiContext::new(
@@ -143,68 +198,147 @@ pub(crate) fn activate(
             authority: accounts.curve_authority.to_cpi_handle(),
         },
     ))?;
+    // mint both allocations directly so transfer tax cannot reduce their launch balances.
     spl::mint_to_checked(
         CpiContext::new_with_signer(
             &anchor_spl::token_2022::ID,
             spl::MintToChecked {
                 mint: accounts.mint.try_to_cpi_handle_mut()?,
-                to: accounts.allocation.try_to_cpi_handle_mut()?,
-                authority: accounts.model.to_cpi_handle(),
+                to: accounts.council_tokens.try_to_cpi_handle_mut()?,
+                authority: accounts.group.to_cpi_handle(),
             },
-            &[model_seeds],
+            &[group_seeds],
         ),
-        config.supply,
-        config.decimals,
+        MODEL_TREASURY_ATOMS,
+        MODEL_TOKEN_DECIMALS,
+    )?;
+    spl::mint_to_checked(
+        CpiContext::new_with_signer(
+            &anchor_spl::token_2022::ID,
+            spl::MintToChecked {
+                mint: accounts.mint.try_to_cpi_handle_mut()?,
+                to: accounts.curve_base_vault.try_to_cpi_handle_mut()?,
+                authority: accounts.group.to_cpi_handle(),
+            },
+            &[group_seeds],
+        ),
+        MODEL_CURVE_SUPPLY_ATOMS,
+        MODEL_TOKEN_DECIMALS,
     )?;
     spl::set_authority(
         CpiContext::new_with_signer(
             &anchor_spl::token_2022::ID,
             spl::SetAuthority {
                 account_or_mint: accounts.mint.try_to_cpi_handle_mut()?,
-                current_authority: accounts.model.to_cpi_handle(),
+                current_authority: accounts.group.to_cpi_handle(),
             },
-            &[model_seeds],
+            &[group_seeds],
         ),
         AuthorityType::MintTokens,
         None,
     )?;
-    fossa_dex::cpi::initialize_model_curve(
-        CpiContext::new(
-            accounts.dex.address(),
-            fossa_dex::cpi::accounts::InitializeModelCurve {
-                launch: fossa_dex::__cpi_accounts_launch::Launch {
-                    payer: accounts.curve_payer.try_to_cpi_handle_mut()?,
-                    config: accounts.curve_config.to_cpi_handle(),
-                    token_a: accounts.t22.to_cpi_handle(),
-                    token_b: accounts.token.to_cpi_handle(),
-                    token_program: accounts.token.to_cpi_handle(),
-                    mint_a: accounts.mint.try_to_cpi_handle_mut()?,
-                    mint_b: accounts.quote.to_cpi_handle(),
-                    pool: accounts.curve_pool.try_to_cpi_handle_mut()?,
-                    authority: accounts.curve_authority.to_cpi_handle(),
-                    source_a: accounts.allocation.try_to_cpi_handle_mut()?,
-                    source_b: accounts.curve_quote_source.try_to_cpi_handle_mut()?,
-                    vault_a: accounts.curve_base_vault.try_to_cpi_handle_mut()?,
-                    vault_b: accounts.curve_quote_vault.try_to_cpi_handle_mut()?,
-                    lp_mint: accounts.curve_lp_mint.try_to_cpi_handle_mut()?,
-                    user_lp: accounts.curve_lp.try_to_cpi_handle_mut()?,
-                    system_program: accounts.system_program.to_cpi_handle(),
-                },
-                admin: accounts.admin.to_cpi_handle(),
+    let council = accounts.council.try_to_cpi_handle_mut()?;
+    fossa_dex::cpi::initialize_model_curve(CpiContext::new(
+        accounts.dex.address(),
+        fossa_dex::cpi::accounts::InitializeModelCurve {
+            launch: fossa_dex::__cpi_accounts_launch::Launch {
+                payer: council,
                 global: accounts.dex_global.to_cpi_handle(),
+                treasury: accounts.dex_treasury.try_to_cpi_handle_mut()?,
+                config: accounts.curve_config.to_cpi_handle(),
+                token_a: accounts.t22.to_cpi_handle(),
+                token_b: accounts.token_program.to_cpi_handle(),
+                token_program: accounts.token_program.to_cpi_handle(),
+                mint_a: accounts.mint.try_to_cpi_handle_mut()?,
+                mint_b: accounts.quote.to_cpi_handle(),
+                pool: accounts.curve_pool.try_to_cpi_handle_mut()?,
+                authority: accounts.curve_authority.to_cpi_handle(),
+                source_a: accounts.council_tokens.try_to_cpi_handle_mut()?,
+                source_b: accounts.curve_quote_source.try_to_cpi_handle_mut()?,
+                vault_a: accounts.curve_base_vault.try_to_cpi_handle_mut()?,
+                vault_b: accounts.curve_quote_vault.try_to_cpi_handle_mut()?,
+                lp_mint: accounts.curve_lp_mint.try_to_cpi_handle_mut()?,
+                user_lp: accounts.curve_lp.try_to_cpi_handle_mut()?,
+                system_program: accounts.system_program.to_cpi_handle(),
             },
-        ),
-        fossa_dex::args::ModelCurve {
-            supply: config.curve.supply,
-            virtual_a: config.curve.virtual_a,
-            virtual_b: config.curve.virtual_b,
-            target_b: config.curve.target_b,
-            minimum_a: config.curve.minimum_a,
+            council: council.into_readonly(),
         },
+    ))?;
+    accounts.group.market = *accounts.market.address();
+    accounts.group.group_id = group_id;
+    accounts.group.bump = ctx.bumps.group;
+    accounts.group.route_to_reserve = 1;
+    accounts.group.backing_vault = *accounts.backing.address();
+    accounts.group.fixed_token_mint = *accounts.mint.address();
+    Ok(())
+}
+
+pub(crate) fn assign(
+    ctx: &mut anchor_lang::Context<crate::contexts::AssignModelGroup>,
+) -> ProgramResult {
+    require(
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
     )?;
-    accounts.model.route_to_reserve = 1;
-    accounts.model.backing_vault = *accounts.backing.address();
-    accounts.model.fixed_token_mint = *accounts.mint.address();
+    ctx.accounts.model.group = ctx
+        .accounts
+        .group
+        .as_ref()
+        .map(|group| *group.address())
+        .unwrap_or_default();
+    Ok(())
+}
+
+pub(crate) fn update_metadata(
+    ctx: &mut anchor_lang::Context<crate::contexts::UpdateGroupMetadata>,
+    metadata: &TokenMetadata,
+) -> ProgramResult {
+    require(
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
+    )?;
+    metadata.validate()?;
+    let accounts = &mut ctx.accounts;
+    mint_state(&accounts.mint, &accounts.group)?;
+    let len = {
+        // the typed mint owns its borrow; this shared read ends before mutable cpi handles.
+        let data = unsafe { accounts.mint.account().borrow_unchecked() };
+        let state = PodStateWithExtensions::<PodMint>::unpack(data)?;
+        let mut value = state.get_variable_len_extension::<MetadataState>()?;
+        value.name = metadata.name.clone();
+        let mut len = state.try_get_new_account_len_for_variable_len_extension(&value)?;
+        value.symbol = metadata.symbol.clone();
+        len = len.max(state.try_get_new_account_len_for_variable_len_extension(&value)?);
+        value.uri = metadata.uri.clone();
+        len.max(state.try_get_new_account_len_for_variable_len_extension(&value)?)
+    };
+    fund_rent(&mut accounts.payer, &mut accounts.mint, len)?;
+    let bump = [accounts.group.bump];
+    let group_id = accounts.group.group_id;
+    let seeds: &[&[u8]] = &[
+        b"model_group",
+        accounts.market.address().as_ref(),
+        group_id.as_ref(),
+        &bump,
+    ];
+    for (field, value) in [
+        (fees::Field::Name, &metadata.name),
+        (fees::Field::Symbol, &metadata.symbol),
+        (fees::Field::Uri, &metadata.uri),
+    ] {
+        fees::token_metadata_update_field(
+            CpiContext::new_with_signer(
+                &anchor_spl::token_2022::ID,
+                fees::TokenMetadataUpdateField {
+                    metadata: accounts.mint.try_to_cpi_handle_mut()?,
+                    update_authority: accounts.group.to_cpi_handle(),
+                },
+                &[seeds],
+            ),
+            field,
+            value.clone(),
+        )?;
+    }
     Ok(())
 }
 
@@ -221,17 +355,17 @@ pub(crate) fn configure(
         config.tax_bps <= 10_000,
         crate::RouterError::InvalidArgument,
     )?;
-    mint_state(&accounts.mint, &accounts.model)?;
+    mint_state(&accounts.mint, &accounts.group)?;
     require(
         !config.route_to_reserve || accounts.mint.supply() > 0,
         crate::RouterError::InvalidState,
     )?;
-    let model_id = accounts.model.model_id;
-    let bump = [accounts.model.bump];
+    let group_id = accounts.group.group_id;
+    let bump = [accounts.group.bump];
     let signer: &[&[u8]] = &[
-        b"model",
+        b"model_group",
         accounts.market.address().as_ref(),
-        model_id.as_ref(),
+        group_id.as_ref(),
         &bump,
     ];
     fees::transfer_fee_set(
@@ -239,14 +373,14 @@ pub(crate) fn configure(
             &anchor_spl::token_2022::ID,
             fees::TransferFeeSetTransferFee {
                 mint: accounts.mint.try_to_cpi_handle_mut()?,
-                authority: accounts.model.to_cpi_handle(),
+                authority: accounts.group.to_cpi_handle(),
             },
             &[signer],
         ),
         config.tax_bps,
         config.maximum_tax,
     )?;
-    accounts.model.route_to_reserve = u8::from(config.route_to_reserve);
+    accounts.group.route_to_reserve = u8::from(config.route_to_reserve);
     Ok(())
 }
 
@@ -260,14 +394,14 @@ pub(crate) fn redeem(
     )?;
     let accounts = &mut ctx.accounts;
     require(redeem.amount > 0, crate::RouterError::InvalidArgument)?;
-    let (model_id, bump) = reserve_accounts(
-        &accounts.model,
+    let (group_id, bump) = reserve_accounts(
+        &accounts.group,
         &accounts.mint,
         &accounts.backing,
         &accounts.quote,
     )?;
-    payment_token(
-        accounts.source.account(),
+    payment_account(
+        &accounts.source,
         accounts.mint.address(),
         accounts.holder.address(),
         &anchor_spl::token_2022::ID,
@@ -285,6 +419,18 @@ pub(crate) fn redeem(
         out > 0 && out >= redeem.minimum_output,
         crate::RouterError::LimitExceeded,
     )?;
+    if accounts.holder.address() != accounts.council.address() {
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                &anchor_lang::system_program::ID,
+                anchor_lang::system_program::Transfer {
+                    from: accounts.holder.try_to_cpi_handle_mut()?,
+                    to: accounts.council.try_to_cpi_handle_mut()?,
+                },
+            ),
+            REDEMPTION_FEE,
+        )?;
+    }
     spl::burn_checked(
         CpiContext::new(
             &anchor_spl::token_2022::ID,
@@ -299,9 +445,9 @@ pub(crate) fn redeem(
     )?;
     let bump = [bump];
     let signer: &[&[u8]] = &[
-        b"model",
+        b"model_group",
         accounts.market.address().as_ref(),
-        model_id.as_ref(),
+        group_id.as_ref(),
         &bump,
     ];
     anchor_spl::token::transfer_checked(
@@ -311,7 +457,7 @@ pub(crate) fn redeem(
                 from: accounts.backing.try_to_cpi_handle_mut()?,
                 mint: accounts.quote.to_cpi_handle(),
                 to: accounts.destination.try_to_cpi_handle_mut()?,
-                authority: accounts.model.to_cpi_handle(),
+                authority: accounts.group.to_cpi_handle(),
             },
             &[signer],
         ),
@@ -328,19 +474,19 @@ pub(crate) fn collect(
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    mint_state(&accounts.mint, &accounts.model)?;
-    payment_token(
-        accounts.destination.account(),
+    mint_state(&accounts.mint, &accounts.group)?;
+    payment_account(
+        &accounts.destination,
         accounts.mint.address(),
-        &accounts.market.treasury2,
+        &accounts.market.bank,
         &anchor_spl::token_2022::ID,
     )?;
-    let model_id = accounts.model.model_id;
-    let bump = [accounts.model.bump];
+    let group_id = accounts.group.group_id;
+    let bump = [accounts.group.bump];
     let signer: &[&[u8]] = &[
-        b"model",
+        b"model_group",
         accounts.market.address().as_ref(),
-        model_id.as_ref(),
+        group_id.as_ref(),
         &bump,
     ];
     fees::withdraw_withheld_tokens_from_mint(CpiContext::new_with_signer(
@@ -348,7 +494,7 @@ pub(crate) fn collect(
         fees::WithdrawWithheldTokensFromMint {
             mint: accounts.mint.try_to_cpi_handle_mut()?,
             destination: accounts.destination.try_to_cpi_handle_mut()?,
-            authority: accounts.model.to_cpi_handle(),
+            authority: accounts.group.to_cpi_handle(),
         },
         &[signer],
     ))
@@ -362,8 +508,8 @@ pub(crate) fn sweep_empty(
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
-    let (model_id, bump) = reserve_accounts(
-        &accounts.model,
+    let (group_id, bump) = reserve_accounts(
+        &accounts.group,
         &accounts.mint,
         &accounts.backing,
         &accounts.quote,
@@ -378,9 +524,9 @@ pub(crate) fn sweep_empty(
     }
     let bump = [bump];
     let signer: &[&[u8]] = &[
-        b"model",
+        b"model_group",
         accounts.market.address().as_ref(),
-        model_id.as_ref(),
+        group_id.as_ref(),
         &bump,
     ];
     anchor_spl::token::transfer_checked(
@@ -390,7 +536,7 @@ pub(crate) fn sweep_empty(
                 from: accounts.backing.try_to_cpi_handle_mut()?,
                 mint: accounts.quote.to_cpi_handle(),
                 to: accounts.destination.try_to_cpi_handle_mut()?,
-                authority: accounts.model.to_cpi_handle(),
+                authority: accounts.group.to_cpi_handle(),
             },
             &[signer],
         ),

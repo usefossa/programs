@@ -6,14 +6,15 @@ use anchor_spl::{mint, token};
 pub struct InitializeConfig {
     #[account(seeds = [b"protocol"], bump)]
     pub global: Account<Global>,
-    #[account(mut, address = global.admin @ crate::DexError::Unauthorized)]
-    pub admin: Signer,
+    #[account(mut, address = global.council @ crate::DexError::Unauthorized)]
+    pub council: Signer,
     pub token: Interface<'static, anchor_spl::token_interface::TokenInterface>,
     #[account(mint::token_program = token)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
+    pub reference_pool: Option<Account<Pool>>,
     #[account(
         init,
-        payer = admin,
+        payer = council,
         seeds = [b"config", mint.address().as_ref()],
         bump
     )]
@@ -23,8 +24,14 @@ pub struct InitializeConfig {
 
 #[derive(Accounts)]
 pub struct Launch {
-    #[account(mut)]
+    // signer views hold no data borrow; council aliases are used only through checked cpi handles.
+    #[account(mut, unsafe(dup))]
     pub payer: Signer,
+    #[account(seeds = [b"protocol"], bump)]
+    pub global: Account<Global>,
+    // the system view holds no data borrow; action_fee skips a self-transfer before borrowing handles.
+    #[account(mut, unsafe(dup), address = global.treasury @ crate::DexError::InvalidAccount)]
+    pub treasury: SystemAccount,
     #[account(constraint = config.enabled == 1 @ crate::DexError::Unauthorized)]
     pub config: Account<Config>,
     pub token_a: Interface<'static, anchor_spl::token_interface::TokenInterface>,
@@ -40,7 +47,11 @@ pub struct Launch {
     #[account(
         init,
         payer = payer,
-        seeds = [b"pool", mint_a.address().as_ref()],
+        seeds = [
+            b"pool",
+            mint_first(mint_a.address(), mint_b.address()).as_ref(),
+            mint_last(mint_a.address(), mint_b.address()).as_ref()
+        ],
         bump
     )]
     pub pool: Account<Pool>,
@@ -96,6 +107,7 @@ pub struct Launch {
 #[derive(Accounts)]
 pub struct InitializePool {
     pub launch: Nested<Launch>,
+    pub council: Option<Signer>,
 }
 
 #[derive(Accounts)]
@@ -106,10 +118,8 @@ pub struct InitializeCurve {
 #[derive(Accounts)]
 pub struct InitializeModelCurve {
     pub launch: Nested<Launch>,
-    #[account(seeds = [b"protocol"], bump)]
-    pub global: Account<Global>,
-    #[account(address = global.admin @ crate::DexError::Unauthorized)]
-    pub admin: Signer,
+    #[account(address = launch.global.council @ crate::DexError::Unauthorized)]
+    pub council: Signer,
 }
 
 #[derive(Accounts)]
@@ -195,7 +205,14 @@ pub struct Graduate {
 
 #[derive(Accounts)]
 pub struct Liquidity {
+    // signer/system aliases hold no data borrow; action_fee skips self-transfers.
+    #[account(mut, unsafe(dup))]
     pub user: Signer,
+    #[account(seeds = [b"protocol"], bump)]
+    pub global: Account<Global>,
+    #[account(mut, unsafe(dup), address = global.treasury @ crate::DexError::InvalidAccount)]
+    pub treasury: SystemAccount,
+    pub system_program: Program<System>,
     #[account(mut)]
     pub pool: Account<Pool>,
     #[account(seeds = [b"authority", pool.address().as_ref()], bump = pool.bump)]
@@ -291,57 +308,11 @@ pub struct CollectTransferTax {
 }
 
 #[derive(Accounts)]
-pub struct CreateVesting {
-    #[account(mut)]
-    pub creator: Signer,
-    #[account(mut)]
-    pub pool: Account<Pool>,
-    #[account(
-        seeds = [b"protocol"],
-        bump,
-        constraint = creator.address() == &pool.creator || creator.address() == &global.admin @ crate::DexError::Unauthorized
-    )]
-    pub global: Account<Global>,
-    #[account(
-        init,
-        payer = creator
-    )]
-    pub vesting: Account<Vesting>,
-    pub beneficiary: UncheckedAccount,
-    pub system_program: Program<System>,
-}
-
-#[derive(Accounts)]
-pub struct ClaimVesting {
-    pub beneficiary: Signer,
-    #[account(mut)]
-    pub pool: Account<Pool>,
-    #[account(
-        mut,
-        constraint = vesting.pool == *pool.address() @ crate::DexError::Unauthorized,
-        constraint = vesting.beneficiary == *beneficiary.address() @ crate::DexError::Unauthorized
-    )]
-    pub vesting: Account<Vesting>,
-    #[account(seeds = [b"authority", pool.address().as_ref()], bump = pool.bump)]
-    pub authority: UncheckedAccount,
-    pub token: Interface<'static, anchor_spl::token_interface::TokenInterface>,
-    #[account(address = pool.mint_a @ crate::DexError::InvalidAccount)]
-    pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
-    #[account(
-        mut,
-        address = pool.vault_a @ crate::DexError::InvalidAccount
-    )]
-    pub vault: InterfaceAccount<anchor_spl::token_interface::TokenAccount>,
-    #[account(mut, token::mint = mint, token::authority = beneficiary, token::token_program = token)]
-    pub destination: InterfaceAccount<anchor_spl::token_interface::TokenAccount>,
-}
-
-#[derive(Accounts)]
 pub struct UpdateConfig {
     #[account(seeds = [b"protocol"], bump)]
     pub global: Account<Global>,
-    #[account(address = global.admin @ crate::DexError::Unauthorized)]
-    pub admin: Signer,
+    #[account(address = global.council @ crate::DexError::Unauthorized)]
+    pub council: Signer,
     pub token: Interface<'static, anchor_spl::token_interface::TokenInterface>,
     #[account(mint::token_program = token)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
@@ -354,12 +325,20 @@ pub struct UpdateConfig {
 }
 
 #[derive(Accounts)]
+pub struct RefreshQuote {
+    #[account(mut)]
+    pub config: Account<Config>,
+    #[account(address = config.reference_pool @ crate::DexError::InvalidAccount)]
+    pub reference_pool: Account<Pool>,
+}
+
+#[derive(Accounts)]
 pub struct InitializeGlobal {
     #[account(mut)]
-    pub admin: Signer,
+    pub council: Signer,
     #[account(
         init,
-        payer = admin,
+        payer = council,
         seeds = [b"protocol"],
         bump
     )]
@@ -375,7 +354,7 @@ pub struct InitializeGlobal {
         constraint = crate::contexts::loader_authority(
             executable.account(),
             program_data.account(),
-            admin.address(),
+            council.address(),
         )? @ crate::DexError::Unauthorized
     )]
     pub program_data: UncheckedAccount,
@@ -391,17 +370,17 @@ pub struct UpdateGlobal {
         constraint = global.account().data_len() == Account::<Global>::INIT_SPACE @ crate::DexError::InvalidAccount
     )]
     pub global: Account<Global>,
-    #[account(address = global.admin @ crate::DexError::Unauthorized)]
-    pub admin: Signer,
-    pub new_admin: Signer,
+    #[account(address = global.council @ crate::DexError::Unauthorized)]
+    pub council: Signer,
+    pub new_council: Signer,
 }
 
 #[derive(Accounts)]
 pub struct UpdateRecipients {
     #[account(seeds = [b"protocol"], bump)]
     pub global: Account<Global>,
-    #[account(address = global.admin @ crate::DexError::Unauthorized)]
-    pub admin: Signer,
+    #[account(address = global.council @ crate::DexError::Unauthorized)]
+    pub council: Signer,
     #[account(mut)]
     pub pool: Account<Pool>,
 }
@@ -432,4 +411,20 @@ pub(crate) fn loader_authority(
         programdata_address.to_bytes() == program_data.address().to_bytes()
             && upgrade_authority.to_bytes() == authority.to_bytes(),
     )
+}
+
+pub fn mint_first<'a>(a: &'a Address, b: &'a Address) -> &'a Address {
+    if a.as_ref() < b.as_ref() {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn mint_last<'a>(a: &'a Address, b: &'a Address) -> &'a Address {
+    if a.as_ref() < b.as_ref() {
+        b
+    } else {
+        a
+    }
 }

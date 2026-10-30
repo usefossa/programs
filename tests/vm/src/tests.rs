@@ -1,6 +1,9 @@
 use anchor_lang::{prelude::Address, AccountDeserialize, InstructionData, ToAccountMetas};
 use litesvm::{types::TransactionResult, LiteSVM};
-use litesvm_token::{CreateAssociatedTokenAccount, CreateMint, MintTo, SetAuthority};
+use litesvm_token::{
+    CreateAssociatedTokenAccountIdempotent as CreateAssociatedTokenAccount, CreateMint, MintTo,
+    SetAuthority,
+};
 use solana_keypair::Keypair;
 use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_message::Message;
@@ -98,7 +101,7 @@ fn router_initializes_typed_market_and_rejects_bad_mint() {
     let initialize = instruction(
         inference_router_program::ID,
         accounts::InitializeMarket {
-            admin: payer.pubkey(),
+            council: payer.pubkey(),
             mint,
             market: market.pubkey(),
             system_program: solana_sdk_ids::system_program::ID,
@@ -108,7 +111,7 @@ fn router_initializes_typed_market_and_rejects_bad_mint() {
     send(&mut svm, &[initialize], &payer, &[&market]).unwrap();
 
     let state: state_types::Market = account(&svm, market.pubkey());
-    assert_eq!(state.admin, payer.pubkey());
+    assert_eq!(state.council, payer.pubkey());
     assert_eq!(state.mint, mint);
 
     let bad_mint = create_mint(&mut svm, &payer, payer.pubkey(), 5);
@@ -116,7 +119,7 @@ fn router_initializes_typed_market_and_rejects_bad_mint() {
     let rejected = instruction(
         inference_router_program::ID,
         accounts::InitializeMarket {
-            admin: payer.pubkey(),
+            council: payer.pubkey(),
             mint: bad_mint,
             market: rejected_market.pubkey(),
             system_program: solana_sdk_ids::system_program::ID,
@@ -139,7 +142,7 @@ fn router_deposit_uses_generated_accounts_and_spl_state() {
         &[instruction(
             inference_router_program::ID,
             accounts::InitializeMarket {
-                admin: payer.pubkey(),
+                council: payer.pubkey(),
                 mint,
                 market: market.pubkey(),
                 system_program: solana_sdk_ids::system_program::ID,
@@ -176,6 +179,31 @@ fn router_deposit_uses_generated_accounts_and_spl_state() {
         &[&user],
     )
     .unwrap();
+
+    let booking = Keypair::new();
+    send(
+        &mut svm,
+        &[instruction(
+            inference_router_program::ID,
+            accounts::InitializeReceipt {
+                market: market.pubkey(),
+                user: user.pubkey(),
+                owner: payer.pubkey(),
+                payer: payer.pubkey(),
+                booking: booking.pubkey(),
+                system_program: solana_sdk_ids::system_program::ID,
+            },
+            router_instruction::InitializeReceipt {},
+        )],
+        &payer,
+        &[&booking],
+    )
+    .unwrap();
+    let receipt: state_types::Booking = account(&svm, booking.pubkey());
+    assert_eq!(receipt.owner, payer.pubkey());
+    assert_eq!(receipt.rent_payer, payer.pubkey());
+    assert_eq!(receipt.user, user.pubkey());
+    assert_eq!(receipt.status, 5);
 
     let source = create_token_account(&mut svm, &payer, mint, payer.pubkey());
     mint_to(&mut svm, &payer, mint, source, 1_000);
@@ -223,6 +251,28 @@ fn router_deposit_uses_generated_accounts_and_spl_state() {
         router_instruction::Deposit { amount: 1 },
     );
     assert!(send(&mut svm, &[rejected], &payer, &[]).is_err());
+
+    let withdraw = instruction(
+        inference_router_program::ID,
+        accounts::Withdraw {
+            market: market.pubkey(),
+            user: user.pubkey(),
+            owner: payer.pubkey(),
+            vault,
+            destination: source,
+            mint,
+            authority,
+            token: anchor_spl::token::ID,
+        },
+        router_instruction::Withdraw { amount: 150 },
+    );
+    send(&mut svm, &[withdraw], &payer, &[]).unwrap();
+    assert_eq!(
+        account::<state_types::User>(&svm, user.pubkey()).free.get(),
+        250
+    );
+    assert_eq!(token_account(&svm, source).amount, 750);
+    assert_eq!(token_account(&svm, vault).amount, 250);
 }
 
 fn set_upgrade_authority(svm: &mut LiteSVM, program: Address, authority: Address) -> Address {
@@ -261,13 +311,16 @@ fn setup_dex() -> DexFixture {
     let program_data = set_upgrade_authority(&mut svm, fossa_dex::ID, payer.pubkey());
     let global = Address::find_program_address(&[b"protocol"], &fossa_dex::ID).0;
     let treasury = Keypair::new().pubkey();
-    let distributor = Keypair::new().pubkey();
+    let distributor = payer.pubkey();
+    svm.airdrop(&treasury, svm.minimum_balance_for_rent_exemption(0))
+        .unwrap();
+    let quote = create_mint(&mut svm, &payer, payer.pubkey(), 6);
     send(
         &mut svm,
         &[instruction(
             fossa_dex::ID,
             accounts::InitializeGlobal {
-                admin: payer.pubkey(),
+                council: payer.pubkey(),
                 global,
                 executable: fossa_dex::ID,
                 program_data,
@@ -277,6 +330,7 @@ fn setup_dex() -> DexFixture {
                 config: args::GlobalConfig {
                     treasury,
                     distributor,
+                    usdc_mint: quote,
                 },
             },
         )],
@@ -285,7 +339,6 @@ fn setup_dex() -> DexFixture {
     )
     .unwrap();
 
-    let quote = create_mint(&mut svm, &payer, payer.pubkey(), 6);
     let config = Address::find_program_address(&[b"config", quote.as_ref()], &fossa_dex::ID).0;
     send(
         &mut svm,
@@ -293,9 +346,10 @@ fn setup_dex() -> DexFixture {
             fossa_dex::ID,
             accounts::InitializeConfig {
                 global,
-                admin: payer.pubkey(),
+                council: payer.pubkey(),
                 token: anchor_spl::token::ID,
                 mint: quote,
+                reference_pool: None,
                 config,
                 system_program: solana_sdk_ids::system_program::ID,
             },
@@ -342,12 +396,12 @@ fn dex_bootstrap_and_config_use_generated_anchor_clients() {
     } = setup_dex();
 
     let global_state: state_types::Global = account(&svm, global);
-    assert_eq!(global_state.admin, payer.pubkey());
+    assert_eq!(global_state.council, payer.pubkey());
     assert_eq!(global_state.treasury, treasury);
     assert_eq!(global_state.distributor, distributor);
 
     let config_state: state_types::Config = account(&svm, config);
-    assert_eq!(config_state.admin, payer.pubkey());
+    assert_eq!(config_state.council, payer.pubkey());
     assert_eq!(config_state.quote_mint, quote);
     assert_eq!(config_state.enabled, 1);
 
@@ -357,7 +411,7 @@ fn dex_bootstrap_and_config_use_generated_anchor_clients() {
         fossa_dex::ID,
         accounts::UpdateConfig {
             global,
-            admin: unauthorized.pubkey(),
+            council: unauthorized.pubkey(),
             token: anchor_spl::token::ID,
             mint: quote,
             config,
@@ -374,6 +428,8 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
     let DexFixture {
         mut svm,
         payer,
+        global,
+        treasury,
         config,
         quote,
         ..
@@ -392,7 +448,7 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
     .send()
     .unwrap();
 
-    let pool = Address::find_program_address(&[b"pool", mint_a.as_ref()], &fossa_dex::ID).0;
+    let pool = pair_address(mint_a, quote);
     let authority = Address::find_program_address(&[b"authority", pool.as_ref()], &fossa_dex::ID).0;
     let lp_mint = Address::find_program_address(&[b"lp_mint", pool.as_ref()], &fossa_dex::ID).0;
     let vault_a = create_token_account(&mut svm, &payer, mint_a, authority);
@@ -405,6 +461,8 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
             accounts::InitializePool {
                 launch: fossa_dex::contexts::__client_accounts_launch::Launch {
                     payer: payer.pubkey(),
+                    global,
+                    treasury,
                     config,
                     token_a: anchor_spl::token::ID,
                     token_b: anchor_spl::token::ID,
@@ -421,12 +479,13 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
                     user_lp: user_lp.pubkey(),
                     system_program: solana_sdk_ids::system_program::ID,
                 },
+                council: Some(payer.pubkey()),
             },
             dex_instruction::InitializePool {
                 config: args::PoolInit {
                     amount_a: 4_000_000,
                     amount_b: 9_000_000,
-                    minimum_lp: 5_999_000,
+                    minimum_lp: 6_000_000,
                 },
             },
         )],
@@ -440,10 +499,10 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
     assert_eq!(initialized.mint_b, quote);
     assert_eq!(initialized.reserve_a.get(), 4_000_000);
     assert_eq!(initialized.reserve_b.get(), 9_000_000);
-    assert_eq!(token_account(&svm, user_lp.pubkey()).amount, 5_999_000);
+    assert_eq!(token_account(&svm, user_lp.pubkey()).amount, 6_000_000);
 
     let before_b = token_account(&svm, source_b).amount;
-    send(
+    let swap_result = send(
         &mut svm,
         &[instruction(
             fossa_dex::ID,
@@ -475,8 +534,47 @@ fn dex_pool_and_swap_use_typed_anchor_accounts() {
     )
     .unwrap();
 
+    eprintln!("amm swap: {} cu", swap_result.compute_units_consumed);
+
     let swapped: state_types::Pool = account(&svm, pool);
     assert!(swapped.reserve_a.get() > initialized.reserve_a.get());
     assert!(swapped.reserve_b.get() < initialized.reserve_b.get());
     assert!(token_account(&svm, source_b).amount > before_b);
 }
+
+fn pair_address(a: Address, b: Address) -> Address {
+    Address::find_program_address(
+        &[
+            b"pool",
+            fossa_dex::contexts::mint_first(&a, &b).as_ref(),
+            fossa_dex::contexts::mint_last(&a, &b).as_ref(),
+        ],
+        &fossa_dex::ID,
+    )
+    .0
+}
+
+fn store_account<
+    T: anchor_lang::Discriminator + anchor_lang::Owner + anchor_lang::bytemuck::Pod,
+>(
+    svm: &mut LiteSVM,
+    address: Address,
+    value: &T,
+) {
+    let mut data = T::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(anchor_lang::bytemuck::bytes_of(value));
+    svm.set_account(
+        address,
+        solana_account::Account {
+            lamports: svm.minimum_balance_for_rent_exemption(data.len()),
+            data,
+            owner: T::OWNER,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+mod dex;
+mod router;

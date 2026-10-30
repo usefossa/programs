@@ -22,20 +22,9 @@ pub struct PoolInit {
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
-pub struct ModelCurve {
-    pub supply: u64,
-    pub virtual_a: u64,
-    pub virtual_b: u64,
-    pub target_b: u64,
-    pub minimum_a: u64,
-}
-
-#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct CurveInit {
-    pub curve: ModelCurve,
     pub mode: u8,
     pub tax_bps: u16,
-    pub curve_kind: u8,
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
@@ -48,6 +37,7 @@ pub struct SwapArgs {
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct LiquidityArgs {
     pub amount: u64,
+    // empty direct pools use both bounds as exact gross deposits; amount remains exact lp.
     pub bound_a: u64,
     pub bound_b: u64,
 }
@@ -60,14 +50,8 @@ pub struct CollectArgs {
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
-pub struct VestingArgs {
-    pub amount: u64,
-    pub cliff: u64,
-    pub duration: u64,
-}
-
-#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct GlobalConfig {
     pub treasury: Address,
     pub distributor: Address,
+    pub usdc_mint: Address,
 }

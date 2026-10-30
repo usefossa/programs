@@ -1203,7 +1203,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "fossa-dex"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
@@ -1225,6 +1225,7 @@ dependencies = [
  "litesvm",
  "litesvm-token",
  "solana-account",
+ "solana-clock 3.2.1",
  "solana-instruction 3.5.1",
  "solana-keypair",
  "solana-loader-v3-interface 7.0.0",
@@ -1447,12 +1448,13 @@ dependencies = [
 
 [[package]]
 name = "inference-router-program"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
  "bytemuck",
  "fossa-dex",
+ "spl-token-metadata-interface",
 ]
 
 [[package]]

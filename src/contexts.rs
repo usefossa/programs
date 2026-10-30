@@ -6,9 +6,9 @@ use anchor_spl::{mint, token};
 #[derive(Accounts)]
 pub struct InitializeMarket {
     #[account(mut)]
-    pub admin: Signer,
+    pub council: Signer,
     pub mint: Account<anchor_spl::mint::Mint>,
-    #[account(init, payer = admin)]
+    #[account(init, payer = council)]
     pub market: Account<Market>,
     pub system_program: Program<System>,
 }
@@ -40,9 +40,17 @@ pub struct RegisterOffer {
         constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
     pub model: Account<Model>,
-    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    #[account(
+        mut,
+        address = model.terms @ crate::RouterError::InvalidAccount,
+        constraint = terms.model == *model.address() @ crate::RouterError::InvalidAccount
+    )]
     pub terms: Slab<Terms, TermsEntry>,
-    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    #[account(
+        mut,
+        address = model.capacity @ crate::RouterError::InvalidAccount,
+        constraint = capacity.model == *model.address() @ crate::RouterError::InvalidAccount
+    )]
     pub capacity: Slab<Capacity, CapacityEntry>,
     #[account(
         seeds = [b"provider", market.address().as_ref(), provider.address().as_ref()],
@@ -144,6 +152,13 @@ pub struct ReserveBooking {
     pub rent_payer: UncheckedAccount,
     #[account(constraint = list.market == *market.address() @ crate::RouterError::InvalidAccount)]
     pub list: Slab<List, Address>,
+    #[account(
+        address = model.group @ crate::RouterError::InvalidAccount,
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
+    )]
+    pub group: Option<Account<ModelGroup>>,
 }
 
 #[derive(Accounts)]
@@ -186,7 +201,8 @@ pub struct ClaimBooking {
         constraint = !vault.has_delegate() && !vault.has_close_authority() && !vault.is_native() @ crate::RouterError::InvalidAccount
     )]
     pub vault: Account<anchor_spl::token::TokenAccount>,
-    #[account(mut, token::mint = mint, token::authority = provider)]
+    // remaining fee destinations reuse this sole typed payout and its cpi handle.
+    #[account(mut, unsafe(dup), token::mint = mint, token::authority = provider)]
     pub payout: Account<anchor_spl::token::TokenAccount>,
     #[account(address = market.mint @ crate::RouterError::InvalidAccount)]
     pub mint: Account<anchor_spl::mint::Mint>,
@@ -296,7 +312,8 @@ pub struct CloseBooking {
 pub struct InitializeModel {
     pub market: Account<Market>,
     pub provider: Signer,
-    #[account(mut)]
+    // the payer may reuse the provider signer; neither view borrows account data.
+    #[account(mut, unsafe(dup))]
     pub payer: Signer,
     #[account(
         seeds = [b"provider", market.address().as_ref(), provider.address().as_ref()],
@@ -338,7 +355,8 @@ pub struct InitializeModel {
 pub struct InitializeProvider {
     pub market: Account<Market>,
     pub provider: Signer,
-    #[account(mut)]
+    // the payer may reuse the provider signer; neither view borrows account data.
+    #[account(mut, unsafe(dup))]
     pub payer: Signer,
     #[account(
         init,
@@ -395,7 +413,8 @@ pub struct InitializeReceipt {
     )]
     pub user: Account<User>,
     pub owner: Signer,
-    #[account(mut)]
+    // the owner may pay rent; both signer views leave account data unborrowed.
+    #[account(mut, unsafe(dup))]
     pub payer: Signer,
     #[account(init, payer = payer)]
     pub booking: Account<Booking>,
@@ -518,7 +537,7 @@ pub struct UpdateListMetadata {
 pub struct ConfigureFees {
     #[account(
         mut,
-        constraint = market.admin == *signer.address() @ crate::RouterError::Unauthorized
+        constraint = market.council == *signer.address() @ crate::RouterError::Unauthorized
     )]
     pub market: Account<Market>,
     pub signer: Signer,
@@ -537,47 +556,40 @@ pub struct ConfigureListFees {
 }
 
 #[derive(Accounts)]
-pub struct ActivateReserve {
-    #[account(constraint = market.admin == *admin.address() @ crate::RouterError::Unauthorized)]
+#[instruction(_group_id: Address)]
+pub struct InitializeModelGroup {
+    #[account(constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
     pub market: Account<Market>,
-    #[account(
-        mut,
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
-        constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
-    )]
-    pub model: Account<Model>,
-    pub admin: Signer,
-    #[account(mut)]
+    // these signer views hold no account-data borrows; cpis use one wallet handle at a time.
+    #[account(mut, unsafe(dup))]
+    pub council: Signer,
+    #[account(mut, unsafe(dup))]
     pub payer: Signer,
     #[account(
+        init,
+        payer = payer,
+        seeds = [b"model_group", market.address().as_ref(), _group_id.as_ref()],
+        bump
+    )]
+    pub group: Account<ModelGroup>,
+    #[account(
         mut,
-        seeds = [b"reserve_mint", model.address().as_ref()],
+        seeds = [b"reserve_mint", group.address().as_ref()],
         bump,
         owner = anchor_lang::system_program::ID @ crate::RouterError::InvalidAccount,
         constraint = mint.data_len() == 0 @ crate::RouterError::InvalidAccount
     )]
     pub mint: UncheckedAccount,
-    #[account(
-        mut,
-        owner = anchor_spl::token::ID @ crate::RouterError::InvalidAccount,
-        constraint = backing.data_len() == anchor_spl::token::TokenAccount::LEN @ crate::RouterError::InvalidAccount
-    )]
-    pub backing: UncheckedAccount,
-    #[account(
-        mut,
-        owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount,
-        constraint = allocation.data_len() == 178 @ crate::RouterError::InvalidAccount
-    )]
-    pub allocation: UncheckedAccount,
+    #[account(init, payer = payer, token::mint = quote, token::authority = group)]
+    pub backing: Account<anchor_spl::token::TokenAccount>,
+    #[account(mut, owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount)]
+    pub council_tokens: UncheckedAccount,
     #[account(address = market.mint @ crate::RouterError::InvalidAccount)]
     pub quote: Account<anchor_spl::mint::Mint>,
-    pub token: Program<Token>,
+    pub token_program: Program<Token>,
     pub t22: Program<Token2022>,
     #[account(address = market.dex_program @ crate::RouterError::InvalidAccount, executable)]
     pub dex: UncheckedAccount,
-    #[account(mut, address = market.treasury @ crate::RouterError::InvalidAccount)]
-    pub curve_payer: Signer,
     #[account(
         address = market.dex_config @ crate::RouterError::InvalidAccount,
         seeds = [b"config", quote.address().as_ref()],
@@ -587,7 +599,7 @@ pub struct ActivateReserve {
     pub curve_config: Account<fossa_dex::state_types::Config>,
     #[account(
         mut,
-        seeds = [b"pool", mint.address().as_ref()],
+        seeds = [b"pool", fossa_dex::contexts::mint_first(mint.address(), quote.address()).as_ref(), fossa_dex::contexts::mint_last(mint.address(), quote.address()).as_ref()],
         bump,
         seeds::program = dex.address()
     )]
@@ -598,23 +610,11 @@ pub struct ActivateReserve {
         seeds::program = dex.address()
     )]
     pub curve_authority: UncheckedAccount,
-    #[account(
-        mut,
-        token::mint = quote,
-        token::authority = curve_payer
-    )]
+    #[account(mut, token::mint = quote, token::authority = council)]
     pub curve_quote_source: Account<anchor_spl::token::TokenAccount>,
-    #[account(
-        mut,
-        owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount,
-        constraint = curve_base_vault.data_len() == 178 @ crate::RouterError::InvalidAccount
-    )]
+    #[account(mut, owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount)]
     pub curve_base_vault: UncheckedAccount,
-    #[account(
-        mut,
-        token::mint = quote,
-        token::authority = curve_authority
-    )]
+    #[account(mut, token::mint = quote, token::authority = curve_authority)]
     pub curve_quote_vault: Account<anchor_spl::token::TokenAccount>,
     #[account(
         mut,
@@ -623,25 +623,21 @@ pub struct ActivateReserve {
         seeds::program = dex.address()
     )]
     pub curve_lp_mint: UncheckedAccount,
-    #[account(
-        mut,
-        token::mint = curve_lp_mint,
-        token::authority = curve_payer
-    )]
-    pub curve_lp: Account<anchor_spl::token::TokenAccount>,
-    #[account(
-        seeds = [b"protocol"],
-        bump,
-        seeds::program = dex.address()
-    )]
+    #[account(mut, signer)]
+    pub curve_lp: UncheckedAccount,
+    #[account(seeds = [b"protocol"], bump, seeds::program = dex.address())]
     pub dex_global: Account<fossa_dex::state_types::Global>,
+    // the treasury may sponsor rent; its view and payer hold no account-data borrows.
+    #[account(mut, unsafe(dup), address = dex_global.treasury @ crate::RouterError::InvalidAccount)]
+    pub dex_treasury: SystemAccount,
     pub system_program: Program<System>,
 }
 
 #[derive(Accounts)]
-pub struct ConfigureReserve {
-    #[account(constraint = market.admin == *admin.address() @ crate::RouterError::Unauthorized)]
+pub struct AssignModelGroup {
+    #[account(constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
     pub market: Account<Market>,
+    pub council: Signer,
     #[account(
         mut,
         seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
@@ -649,12 +645,47 @@ pub struct ConfigureReserve {
         constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
     pub model: Account<Model>,
-    pub admin: Signer,
+    #[account(
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
+    )]
+    pub group: Option<Account<ModelGroup>>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateGroupMetadata {
+    #[account(constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
+    pub market: Account<Market>,
+    pub council: Signer,
+    // the signer view may reuse council; it holds no account-data borrow.
+    #[account(mut, unsafe(dup))]
+    pub payer: Signer,
+    #[account(
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
+    )]
+    pub group: Account<ModelGroup>,
+    #[account(mut, address = group.fixed_token_mint @ crate::RouterError::InvalidAccount, mint::token_program = t22)]
+    pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
+    pub t22: Program<Token2022>,
+    pub system_program: Program<System>,
+}
+
+#[derive(Accounts)]
+pub struct ConfigureReserve {
+    #[account(constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
+    pub market: Account<Market>,
     #[account(
         mut,
-        address = model.fixed_token_mint @ crate::RouterError::InvalidAccount,
-        mint::token_program = t22
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
+    pub group: Account<ModelGroup>,
+    pub council: Signer,
+    #[account(mut, address = group.fixed_token_mint @ crate::RouterError::InvalidAccount, mint::token_program = t22)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
     pub t22: Program<Token2022>,
 }
@@ -663,60 +694,52 @@ pub struct ConfigureReserve {
 pub struct RedeemReserve {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
-        constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
-    pub model: Account<Model>,
-    #[account(
-        mut,
-        address = model.fixed_token_mint @ crate::RouterError::InvalidAccount,
-        mint::token_program = t22
-    )]
+    pub group: Account<ModelGroup>,
+    #[account(mut, address = group.fixed_token_mint @ crate::RouterError::InvalidAccount, mint::token_program = t22)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
-    #[account(
-        mut,
-        token::mint = mint,
-        token::authority = holder,
-        token::token_program = t22
-    )]
+    #[account(mut, token::mint = mint, token::authority = holder, token::token_program = t22)]
     pub source: InterfaceAccount<anchor_spl::token_interface::TokenAccount>,
+    // holder and council are view wrappers; self-redemption skips the lamport transfer.
+    #[account(mut, unsafe(dup))]
     pub holder: Signer,
     #[account(
         mut,
-        address = model.backing_vault @ crate::RouterError::InvalidAccount,
+        address = group.backing_vault @ crate::RouterError::InvalidAccount,
         token::mint = quote,
-        token::authority = model
+        token::authority = group
     )]
     pub backing: Account<anchor_spl::token::TokenAccount>,
     #[account(mut, token::mint = quote, token::authority = holder)]
     pub destination: Account<anchor_spl::token::TokenAccount>,
     #[account(address = market.mint @ crate::RouterError::InvalidAccount)]
     pub quote: Account<anchor_spl::mint::Mint>,
+    #[account(mut, unsafe(dup), address = market.council @ crate::RouterError::InvalidAccount)]
+    pub council: SystemAccount,
     pub token: Program<Token>,
     pub t22: Program<Token2022>,
+    pub system_program: Program<System>,
 }
 
 #[derive(Accounts)]
 pub struct CollectReserveTax {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
-        constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
-    pub model: Account<Model>,
-    #[account(
-        mut,
-        address = model.fixed_token_mint @ crate::RouterError::InvalidAccount,
-        mint::token_program = t22
-    )]
+    pub group: Account<ModelGroup>,
+    #[account(mut, address = group.fixed_token_mint @ crate::RouterError::InvalidAccount, mint::token_program = t22)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
     #[account(
         mut,
         token::mint = mint,
         token::token_program = t22,
-        constraint = destination.owner() == &market.treasury2 @ crate::RouterError::InvalidAccount
+        constraint = destination.owner() == &market.bank @ crate::RouterError::InvalidAccount
     )]
     pub destination: InterfaceAccount<anchor_spl::token_interface::TokenAccount>,
     pub t22: Program<Token2022>,
@@ -726,28 +749,21 @@ pub struct CollectReserveTax {
 pub struct SweepReserve {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
-        constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
+        seeds = [b"model_group", market.address().as_ref(), group.group_id.as_ref()],
+        bump = group.bump,
+        constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
-    pub model: Account<Model>,
-    #[account(
-        address = model.fixed_token_mint @ crate::RouterError::InvalidAccount,
-        owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount
-    )]
+    pub group: Account<ModelGroup>,
+    #[account(address = group.fixed_token_mint @ crate::RouterError::InvalidAccount, owner = anchor_spl::token_2022::ID @ crate::RouterError::InvalidAccount)]
     pub mint: InterfaceAccount<anchor_spl::token_interface::Mint>,
     #[account(
         mut,
-        address = model.backing_vault @ crate::RouterError::InvalidAccount,
+        address = group.backing_vault @ crate::RouterError::InvalidAccount,
         token::mint = quote,
-        token::authority = model
+        token::authority = group
     )]
     pub backing: Account<anchor_spl::token::TokenAccount>,
-    #[account(
-        mut,
-        token::mint = quote,
-        constraint = destination.owner() == &market.treasury @ crate::RouterError::InvalidAccount
-    )]
+    #[account(mut, token::mint = quote, constraint = destination.owner() == &market.council @ crate::RouterError::InvalidAccount)]
     pub destination: Account<anchor_spl::token::TokenAccount>,
     #[account(address = market.mint @ crate::RouterError::InvalidAccount)]
     pub quote: Account<anchor_spl::mint::Mint>,
@@ -756,28 +772,20 @@ pub struct SweepReserve {
 
 #[derive(Accounts)]
 pub struct ConfigureDex {
-    #[account(
-        mut,
-        constraint = market.admin == *admin.address() @ crate::RouterError::Unauthorized
-    )]
+    #[account(mut, constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
     pub market: Account<Market>,
-    pub admin: Signer,
+    pub council: Signer,
     #[account(address = fossa_dex::ID @ crate::RouterError::InvalidAccount, executable)]
     pub dex: UncheckedAccount,
-    #[account(
-        seeds = [b"config", market.mint.as_ref()],
-        bump,
-        seeds::program = dex.address()
-    )]
+    #[account(seeds = [b"config", market.mint.as_ref()], bump, seeds::program = dex.address())]
     pub config: Account<fossa_dex::state_types::Config>,
+    #[account(seeds = [b"protocol"], bump, seeds::program = dex.address())]
+    pub global: Account<fossa_dex::state_types::Global>,
 }
 
 #[derive(Accounts)]
-pub struct RotateAdmin {
-    #[account(
-        mut,
-        constraint = market.admin == *current.address() @ crate::RouterError::Unauthorized
-    )]
+pub struct RotateCouncil {
+    #[account(mut, constraint = market.council == *current.address() @ crate::RouterError::Unauthorized)]
     pub market: Account<Market>,
     pub current: Signer,
     pub next: Signer,

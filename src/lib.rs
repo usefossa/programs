@@ -13,7 +13,7 @@ pub mod state_types;
 use anchor_lang::prelude::*;
 use args::*;
 pub use contexts::*;
-pub const ID: Address = Address::new_from_array([8; 32]);
+pub const ID: Address = anchor_lang::address!("F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT");
 
 #[error_code]
 pub enum RouterError {
@@ -143,11 +143,21 @@ pub mod fossa_router {
     pub fn configure_list_fees(ctx: &mut Context<ConfigureListFees>, fees: ListFees) -> Result<()> {
         instructions::fees::configure_list(ctx, fees)
     }
-    pub fn activate_reserve(
-        ctx: &mut Context<ActivateReserve>,
-        config: ReserveActivation,
+    pub fn initialize_model_group(
+        ctx: &mut Context<InitializeModelGroup>,
+        group_id: Address,
+        config: GroupInit,
     ) -> Result<()> {
-        instructions::reserve::activate(ctx, &config)
+        instructions::reserve::initialize_group(ctx, group_id, &config)
+    }
+    pub fn assign_model_group(ctx: &mut Context<AssignModelGroup>) -> Result<()> {
+        instructions::reserve::assign(ctx)
+    }
+    pub fn update_group_metadata(
+        ctx: &mut Context<UpdateGroupMetadata>,
+        metadata: TokenMetadata,
+    ) -> Result<()> {
+        instructions::reserve::update_metadata(ctx, &metadata)
     }
     pub fn configure_reserve(
         ctx: &mut Context<ConfigureReserve>,
@@ -167,7 +177,7 @@ pub mod fossa_router {
     pub fn configure_dex(ctx: &mut Context<ConfigureDex>) -> Result<()> {
         instructions::fees::configure_dex(ctx)
     }
-    pub fn rotate_admin(ctx: &mut Context<RotateAdmin>) -> Result<()> {
-        instructions::fees::rotate_admin(ctx)
+    pub fn rotate_council(ctx: &mut Context<RotateCouncil>) -> Result<()> {
+        instructions::fees::rotate_council(ctx)
     }
 }
