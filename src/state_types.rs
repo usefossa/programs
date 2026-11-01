@@ -2,6 +2,13 @@ use anchor_lang::prelude::*;
 
 pub const URI_MAX: usize = 256;
 pub const MAX_ENTRIES: usize = 4096;
+pub const MAX_BOOK_GROWTH: usize = 10_240 / core::mem::size_of::<TermsEntry>();
+pub const MODALITY_TEXT: u8 = 1;
+pub const MODALITY_IMAGE: u8 = 2;
+pub const MODALITY_AUDIO: u8 = 4;
+pub const MODALITY_VIDEO: u8 = 8;
+pub const MODALITIES: u8 = MODALITY_TEXT | MODALITY_IMAGE | MODALITY_AUDIO | MODALITY_VIDEO;
+pub const OFFER_VERSION: u8 = 1;
 
 #[account]
 pub struct Market {
@@ -87,10 +94,13 @@ pub struct User {
 }
 
 #[account]
-pub struct Terms {
+pub struct FilteredTerms {
     pub model: Address,
     pub limit: PodU32,
 }
+
+// new discriminator prevents old slab entries from being read with a different stride.
+pub type Terms = FilteredTerms;
 
 #[account]
 pub struct Capacity {
@@ -103,15 +113,21 @@ pub struct Capacity {
 pub struct TermsEntry {
     pub provider: Address,
     pub payout: Address,
-    pub reserved: [u8; 32],
+    pub checkpoint: [u8; 32],
     pub input_rate: PodU32,
     pub cached_rate: PodU32,
     pub output_rate: PodU32,
     pub speed: PodU16,
     pub privacy: u8,
     pub active: u8,
-    pub reserved2: [u8; 4],
+    pub input_modalities: u8,
+    pub output_modalities: u8,
+    pub version: u8,
+    pub reserved: u8,
     pub capacity: PodU32,
+    pub context_window: PodU32,
+    pub max_input: PodU32,
+    pub max_output: PodU32,
 }
 
 #[repr(C)]
@@ -133,7 +149,7 @@ pub struct List {
 }
 
 #[account]
-pub struct Booking {
+pub struct FilteredBooking {
     pub owner: Address,
     pub provider: Address,
     pub market: Address,
@@ -172,7 +188,18 @@ pub struct Booking {
     pub protocol_share: PodU16,
     pub reserve_destination: u8,
     pub reserved6: [u8; 3],
+    pub checkpoint: [u8; 32],
+    pub offer_context_window: PodU32,
+    pub offer_max_input: PodU32,
+    pub offer_max_output: PodU32,
+    pub offer_input_modalities: u8,
+    pub offer_output_modalities: u8,
+    pub requested_input_modalities: u8,
+    pub requested_output_modalities: u8,
 }
+
+// existing bookings require a separate migration before this layout can be deployed.
+pub type Booking = FilteredBooking;
 
 #[repr(C)]
 #[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]

@@ -1,4 +1,8 @@
-use crate::{args::Metadata, helpers::require, state_types::MAX_ENTRIES};
+use crate::{
+    args::Metadata,
+    helpers::require,
+    state_types::{MAX_BOOK_GROWTH, MAX_ENTRIES},
+};
 use anchor_lang::prelude::{Address, ProgramResult};
 use anchor_lang::AnchorAccount;
 
@@ -94,7 +98,7 @@ pub(crate) fn grow(
     let old = accounts.model.limit.get() as usize;
     let limit = limit as usize;
     require(
-        limit > old && limit <= MAX_ENTRIES && limit - old <= 85,
+        limit > old && limit <= MAX_ENTRIES && limit - old <= MAX_BOOK_GROWTH,
         crate::RouterError::InvalidArgument,
     )?;
     accounts.terms.resize_to_capacity(limit as u32)?;

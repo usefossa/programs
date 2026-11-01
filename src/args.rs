@@ -1,4 +1,4 @@
-use crate::state_types::URI_MAX;
+use crate::state_types::{MODALITIES, URI_MAX};
 use alloc::string::String;
 use anchor_lang::prelude::*;
 
@@ -32,6 +32,13 @@ pub struct Offer {
     pub privacy: bool,
     pub active: bool,
     pub capacity: u32,
+    // sha-256 of an immutable checkpoint identity; zero never means all checkpoints.
+    pub checkpoint: [u8; 32],
+    pub input_modalities: u8,
+    pub output_modalities: u8,
+    pub context_window: u32,
+    pub max_input: u32,
+    pub max_output: u32,
 }
 
 impl Offer {
@@ -41,10 +48,21 @@ impl Offer {
                 && self.output_rate > 0
                 && self.cached_rate <= self.input_rate
                 && self.speed > 0
-                && self.capacity > 0,
+                && self.capacity > 0
+                && self.checkpoint != [0; 32]
+                && valid_modalities(self.input_modalities)
+                && valid_modalities(self.output_modalities)
+                && self.max_input > 0
+                && self.max_output > 0
+                && self.max_input <= self.context_window
+                && self.max_output <= self.context_window,
             crate::RouterError::InvalidArgument,
         )
     }
+}
+
+pub(crate) fn valid_modalities(mask: u8) -> bool {
+    mask != 0 && mask & !MODALITIES == 0
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
@@ -62,6 +80,11 @@ pub struct ReserveRequest {
     pub estimated_cached: u32,
     pub estimated_output: u32,
     pub cache_provider: Address,
+    pub checkpoint: [u8; 32],
+    pub input_modalities: u8,
+    pub output_modalities: u8,
+    pub min_context: u32,
+    pub limits_configured: bool,
 }
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize, PartialEq)]
@@ -146,4 +169,49 @@ pub struct ReserveConfig {
 pub struct Redeem {
     pub amount: u64,
     pub minimum_output: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_types::MODALITY_TEXT;
+
+    #[test]
+    fn offer_requires_explicit_checkpoint_modalities_and_consistent_limits() {
+        let offer = Offer {
+            slot: 0,
+            input_rate: 1,
+            cached_rate: 0,
+            output_rate: 1,
+            speed: 1,
+            privacy: false,
+            active: true,
+            capacity: 1,
+            checkpoint: [7; 32],
+            input_modalities: MODALITY_TEXT,
+            output_modalities: MODALITY_TEXT,
+            context_window: 200,
+            max_input: 200,
+            max_output: 100,
+        };
+        // independent caps need not be attainable simultaneously within the context window.
+        assert!(offer.validate().is_ok());
+        let changes: &[fn(&mut Offer)] = &[
+            |o| o.checkpoint = [0; 32],
+            |o| o.input_modalities = 0,
+            |o| o.output_modalities = 0,
+            |o| o.input_modalities |= 16,
+            |o| o.output_modalities |= 128,
+            |o| o.context_window = 0,
+            |o| o.max_input = 0,
+            |o| o.max_output = 0,
+            |o| o.max_input = 201,
+            |o| o.max_output = 201,
+        ];
+        for change in changes {
+            let mut invalid = offer;
+            change(&mut invalid);
+            assert!(invalid.validate().is_err());
+        }
+    }
 }

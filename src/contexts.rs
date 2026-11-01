@@ -490,6 +490,7 @@ pub struct GrowBooks {
     pub capacity: Slab<Capacity, CapacityEntry>,
     #[account(mut)]
     pub payer: Signer,
+    pub system_program: Program<System>,
 }
 
 #[derive(Accounts)]

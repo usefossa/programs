@@ -2,6 +2,9 @@ use super::*;
 use anchor_lang::bytemuck::Zeroable;
 use inference_router_program::{accounts, args, instruction as ix, state_types};
 
+#[path = "router_filters.rs"]
+mod filters;
+
 fn initialize_market(svm: &mut LiteSVM, payer: &Keypair, mint: Address) -> Address {
     let market = Keypair::new();
     send(
@@ -627,6 +630,12 @@ fn two_models_share_group_backing_and_claim_retains_assignment_snapshot() {
                     privacy: false,
                     active: true,
                     capacity: 10,
+                    checkpoint: [7; 32],
+                    input_modalities: state_types::MODALITY_TEXT,
+                    output_modalities: state_types::MODALITY_TEXT,
+                    context_window: 200,
+                    max_input: 100,
+                    max_output: 100,
                 },
             },
         );
@@ -741,6 +750,11 @@ fn two_models_share_group_backing_and_claim_retains_assignment_snapshot() {
                     estimated_cached: 0,
                     estimated_output: 100,
                     cache_provider: Address::default(),
+                    checkpoint: [7; 32],
+                    input_modalities: state_types::MODALITY_TEXT,
+                    output_modalities: state_types::MODALITY_TEXT,
+                    min_context: 0,
+                    limits_configured: false,
                 },
                 generation: None,
             },

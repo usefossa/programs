@@ -1,7 +1,7 @@
 use crate::{
     args::{Metadata, Offer},
     helpers::require,
-    state_types::{CapacityEntry, TermsEntry},
+    state_types::{CapacityEntry, TermsEntry, OFFER_VERSION},
 };
 use anchor_lang::prelude::ProgramResult;
 use anchor_lang::AnchorAccount;
@@ -39,15 +39,21 @@ pub(crate) fn register_offer(
     terms.try_push(TermsEntry {
         provider: *provider.address(),
         payout: *payout.address(),
-        reserved: [0; 32],
+        checkpoint: offer.checkpoint,
         input_rate: offer.input_rate.into(),
         cached_rate: offer.cached_rate.into(),
         output_rate: offer.output_rate.into(),
         speed: offer.speed.into(),
         privacy: u8::from(offer.privacy),
         active: u8::from(offer.active),
-        reserved2: [0; 4],
+        input_modalities: offer.input_modalities,
+        output_modalities: offer.output_modalities,
+        version: OFFER_VERSION,
+        reserved: 0,
         capacity: offer.capacity.into(),
+        context_window: offer.context_window.into(),
+        max_input: offer.max_input.into(),
+        max_output: offer.max_output.into(),
     })?;
     capacity.try_push(CapacityEntry {
         reserved: [0; 16],
@@ -83,6 +89,14 @@ pub(crate) fn update_offer(
     entry.privacy = u8::from(offer.privacy);
     entry.active = u8::from(offer.active);
     entry.capacity = offer.capacity.into();
+    entry.checkpoint = offer.checkpoint;
+    entry.input_modalities = offer.input_modalities;
+    entry.output_modalities = offer.output_modalities;
+    entry.version = OFFER_VERSION;
+    entry.reserved = 0;
+    entry.context_window = offer.context_window.into();
+    entry.max_input = offer.max_input.into();
+    entry.max_output = offer.max_output.into();
     Ok(())
 }
 

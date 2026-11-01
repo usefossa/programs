@@ -67,17 +67,17 @@ pub(crate) fn reserve(
     let protocol_destination = reserve
         .map(|group| group.backing_vault)
         .unwrap_or(accounts.market.council);
-    let mut request_state = request.validate(accounts.user.free.get())?;
-    request_state.spend = fee_budget(request_state.spend, fee_bps);
+    let spend = fee_budget(request.validate(accounts.user.free.get())?, fee_bps);
     let mut chosen = select(
         accounts.terms.as_slice(),
         accounts.capacity.as_slice(),
         accounts.list.as_slice(),
-        &request_state,
+        request,
+        spend,
     )?;
     chosen.reserve = add(chosen.reserve, bps_ceil(chosen.reserve, fee_bps))?;
     chosen.score = add(chosen.score, bps_ceil(chosen.score, fee_bps))?;
-    let terms = *accounts
+    let terms = accounts
         .terms
         .get(chosen.slot as usize)
         .ok_or(crate::RouterError::InvalidAccount)?;
@@ -89,7 +89,7 @@ pub(crate) fn reserve(
     }
     let claim_seconds = CLAIM_SECONDS
         + i64::from(
-            request_state
+            request
                 .max_output
                 .div_ceil(u32::from(terms.speed.get().max(1))),
         );
@@ -106,8 +106,8 @@ pub(crate) fn reserve(
     accounts.booking.input_rate = terms.input_rate;
     accounts.booking.cached_rate = terms.cached_rate;
     accounts.booking.output_rate = terms.output_rate;
-    accounts.booking.max_input = request_state.max_input.into();
-    accounts.booking.max_output = request_state.max_output.into();
+    accounts.booking.max_input = request.max_input.into();
+    accounts.booking.max_output = request.max_output.into();
     accounts.booking.claim_end = claim_end.into();
     accounts.booking.reserved = [0; 8];
     accounts.booking.status = 0;
@@ -117,7 +117,7 @@ pub(crate) fn reserve(
     accounts.booking.input = 0.into();
     accounts.booking.cached = 0.into();
     accounts.booking.output = 0.into();
-    accounts.booking.min_speed = request_state.min_speed.into();
+    accounts.booking.min_speed = request.min_speed.into();
     accounts.booking.reserved3 = [0; 10];
     accounts.booking.user = *accounts.user.address();
     accounts.booking.model = *accounts.model.address();
@@ -126,7 +126,7 @@ pub(crate) fn reserve(
     accounts.booking.provider_list = *accounts.list.address();
     accounts.booking.slot = chosen.slot.into();
     accounts.booking.reserved4 = 0;
-    accounts.booking.requested_privacy = u8::from(request_state.private);
+    accounts.booking.requested_privacy = u8::from(request.private);
     accounts.booking.cache_allowed = u8::from(chosen.cache);
     accounts.booking.reserved5 = 0;
     accounts.booking.estimated_score = chosen.score.into();
@@ -137,6 +137,14 @@ pub(crate) fn reserve(
     accounts.booking.protocol_share = protocol_share.into();
     accounts.booking.reserve_destination = u8::from(reserve_destination);
     accounts.booking.reserved6 = [0; 3];
+    accounts.booking.checkpoint = terms.checkpoint;
+    accounts.booking.offer_context_window = terms.context_window;
+    accounts.booking.offer_max_input = terms.max_input;
+    accounts.booking.offer_max_output = terms.max_output;
+    accounts.booking.offer_input_modalities = terms.input_modalities;
+    accounts.booking.offer_output_modalities = terms.output_modalities;
+    accounts.booking.requested_input_modalities = request.input_modalities;
+    accounts.booking.requested_output_modalities = request.output_modalities;
     Ok(())
 }
 
