@@ -215,3 +215,19 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
+pub struct BookingLimits {
+    pub wallet_window_seconds: u32,
+    pub wallet_bookings_per_window: u32,
+    pub wallet_booking_capacity: u32,
+}
+
+impl BookingLimits {
+    pub fn validate(&self) -> ProgramResult {
+        crate::helpers::require(
+            (1..=86_400).contains(&self.wallet_window_seconds),
+            crate::RouterError::InvalidArgument,
+        )
+    }
+}

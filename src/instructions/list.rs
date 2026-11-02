@@ -11,9 +11,7 @@ pub(crate) fn position(providers: &[Address], provider: &Address) -> Result<usiz
     providers.binary_search(provider)
 }
 
-pub(crate) fn state<'a>(
-    list: &'a Slab<List, Address>,
-) -> Result<&'a Slab<List, Address>, ProgramError> {
+pub(crate) fn state(list: &Slab<List, Address>) -> Result<&Slab<List, Address>, ProgramError> {
     let limit = list.limit.get() as usize;
     require(
         (1..=MAX_ENTRIES).contains(&limit)
@@ -61,24 +59,36 @@ pub(crate) fn update(
     )?;
     let accounts = &mut ctx.accounts;
     require(
+        accounts.list.reserved[0] == 0,
+        crate::RouterError::InvalidState,
+    )?;
+    change(&mut accounts.list, provider, enabled)
+}
+
+pub(crate) fn change(
+    list: &mut Slab<List, Address>,
+    provider: Address,
+    enabled: bool,
+) -> ProgramResult {
+    require(
         provider != Address::default(),
         crate::RouterError::InvalidArgument,
     )?;
-    state(&accounts.list)?;
-    let count = accounts.list.len();
-    let found = position(accounts.list.as_slice(), &provider);
+    state(list)?;
+    let count = list.len();
+    let found = position(list.as_slice(), &provider);
     if enabled {
         require(
-            count < accounts.list.limit.get() as usize,
+            count < list.limit.get() as usize,
             crate::RouterError::Unavailable,
         )?;
         let at = found.err().ok_or(crate::RouterError::InvalidState)?;
-        accounts.list.try_push(provider)?;
-        accounts.list.as_mut_slice()[at..=count].rotate_right(1);
+        list.try_push(provider)?;
+        list.as_mut_slice()[at..=count].rotate_right(1);
     } else {
         let at = found.map_err(|_| crate::RouterError::InvalidState)?;
-        accounts.list.as_mut_slice()[at..count].rotate_left(1);
-        accounts.list.pop();
+        list.as_mut_slice()[at..count].rotate_left(1);
+        list.pop();
     }
     Ok(())
 }
@@ -89,6 +99,10 @@ pub(crate) fn close(ctx: &mut anchor_lang::Context<crate::contexts::CloseList>) 
         crate::RouterError::InvalidArgument,
     )?;
     let accounts = &mut ctx.accounts;
+    require(
+        accounts.list.reserved[0] == 0,
+        crate::RouterError::InvalidState,
+    )?;
     state(&accounts.list)?;
     require(accounts.list.is_empty(), crate::RouterError::InvalidState)?;
     let bump = ctx.bumps.metadata;

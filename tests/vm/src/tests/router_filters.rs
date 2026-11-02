@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "scoped_routing.rs"]
+mod scoped;
 use anchor_lang::accounts::Slab;
 use state_types::{MODALITY_AUDIO, MODALITY_IMAGE, MODALITY_TEXT, MODALITY_VIDEO};
 
@@ -360,10 +363,10 @@ impl FilterFixture {
             .to_vec()
     }
 
-    fn terms(&self) -> Vec<state_types::TermsEntry> {
+    fn terms(&self) -> Vec<state_types::LegacyTermsEntry> {
         self.entries(
             self.terms,
-            Slab::<state_types::Terms, state_types::TermsEntry>::space_for(0),
+            Slab::<state_types::FilteredTerms, state_types::LegacyTermsEntry>::space_for(0),
         )
     }
 
@@ -701,8 +704,8 @@ fn booking_pins_offer_capabilities_through_update_claim_release_expiry_and_reuse
 fn unconfigured_reserved_and_legacy_layouts_fail_closed() {
     let mut f = FilterFixture::new();
     let original = f.svm.get_account(&f.terms).unwrap();
-    let offset = Slab::<state_types::Terms, state_types::TermsEntry>::space_for(0);
-    let changes: &[fn(&mut state_types::TermsEntry)] = &[
+    let offset = Slab::<state_types::FilteredTerms, state_types::LegacyTermsEntry>::space_for(0);
+    let changes: &[fn(&mut state_types::LegacyTermsEntry)] = &[
         |o| o.version = 0,
         |o| o.version = 2,
         |o| o.reserved = 1,
@@ -715,7 +718,7 @@ fn unconfigured_reserved_and_legacy_layouts_fail_closed() {
     ];
     for change in changes {
         let mut altered = original.clone();
-        let entries: &mut [state_types::TermsEntry] =
+        let entries: &mut [state_types::LegacyTermsEntry] =
             anchor_lang::bytemuck::cast_slice_mut(&mut altered.data[offset..]);
         for entry in entries {
             change(entry);
@@ -742,6 +745,156 @@ fn unconfigured_reserved_and_legacy_layouts_fail_closed() {
     assert!(send(&mut f.svm, &[reserve], &f.payer, &[]).is_err());
     assert_eq!(f.free(), 100_000);
     assert_eq!(f.active(), [0, 0]);
-    assert_eq!(core::mem::size_of::<state_types::TermsEntry>(), 132);
+    assert_eq!(core::mem::size_of::<state_types::LegacyTermsEntry>(), 132);
     assert_eq!(8 + core::mem::size_of::<state_types::Booking>(), 520);
+}
+
+impl FilterFixture {
+    fn time(&mut self, now: i64) {
+        let mut clock = self.svm.get_sysvar::<solana_clock::Clock>();
+        clock.unix_timestamp = now;
+        self.svm.set_sysvar(&clock);
+    }
+    fn reserve_next(&mut self, generation: u64) {
+        let reserve = self.reserve(self.request(), generation);
+        send(&mut self.svm, &[reserve], &self.payer, &[]).unwrap();
+    }
+    fn new_lane(&mut self) {
+        let user = Keypair::new();
+        let booking = Keypair::new();
+        let authority = Address::find_program_address(
+            &[b"vault", user.pubkey().as_ref()],
+            &inference_router_program::ID,
+        )
+        .0;
+        let vault = create_token_account(&mut self.svm, &self.payer, self.mint, authority);
+        let payment =
+            create_token_account(&mut self.svm, &self.payer, self.mint, self.payer.pubkey());
+        mint_to(&mut self.svm, &self.payer, self.mint, payment, 100_000);
+        send(
+            &mut self.svm,
+            &[
+                instruction(
+                    inference_router_program::ID,
+                    accounts::InitializeUser {
+                        owner: self.payer.pubkey(),
+                        market: self.market,
+                        user: user.pubkey(),
+                        authority,
+                        vault,
+                        system_program: solana_sdk_ids::system_program::ID,
+                    },
+                    ix::InitializeUser {},
+                ),
+                instruction(
+                    inference_router_program::ID,
+                    accounts::Deposit {
+                        market: self.market,
+                        user: user.pubkey(),
+                        owner: self.payer.pubkey(),
+                        source: payment,
+                        authority,
+                        vault,
+                        mint: self.mint,
+                        token: anchor_spl::token::ID,
+                    },
+                    ix::Deposit { amount: 100_000 },
+                ),
+                instruction(
+                    inference_router_program::ID,
+                    accounts::InitializeReceipt {
+                        market: self.market,
+                        user: user.pubkey(),
+                        owner: self.payer.pubkey(),
+                        payer: self.payer.pubkey(),
+                        booking: booking.pubkey(),
+                        system_program: solana_sdk_ids::system_program::ID,
+                    },
+                    ix::InitializeReceipt {},
+                ),
+            ],
+            &self.payer,
+            &[&user, &booking],
+        )
+        .unwrap();
+        self.user = user.pubkey();
+        self.booking = booking.pubkey();
+        self.vault = vault;
+        self.authority = authority;
+    }
+    fn new_model(&mut self) {
+        self.model_id = Keypair::new().pubkey();
+        self.model = Address::find_program_address(
+            &[b"model", self.market.as_ref(), self.model_id.as_ref()],
+            &inference_router_program::ID,
+        )
+        .0;
+        let terms = Keypair::new();
+        let capacity = Keypair::new();
+        let profile = |provider: Address| {
+            Address::find_program_address(
+                &[b"provider", self.market.as_ref(), provider.as_ref()],
+                &inference_router_program::ID,
+            )
+            .0
+        };
+        let metadata = Address::find_program_address(
+            &[b"model_metadata", self.model.as_ref()],
+            &inference_router_program::ID,
+        )
+        .0;
+        send(
+            &mut self.svm,
+            &[instruction(
+                inference_router_program::ID,
+                accounts::InitializeModel {
+                    market: self.market,
+                    provider: self.providers[0].pubkey(),
+                    payer: self.payer.pubkey(),
+                    profile: profile(self.providers[0].pubkey()),
+                    model: self.model,
+                    terms: terms.pubkey(),
+                    capacity: capacity.pubkey(),
+                    metadata,
+                    system_program: solana_sdk_ids::system_program::ID,
+                },
+                ix::InitializeModel {
+                    model_id: self.model_id,
+                    limit: 2,
+                    metadata: args::Metadata {
+                        document_hash: [9; 32],
+                        uri: "https://example.com/second.json".into(),
+                    },
+                },
+            )],
+            &self.payer,
+            &[&self.providers[0], &terms, &capacity],
+        )
+        .unwrap();
+        self.terms = terms.pubkey();
+        self.capacity = capacity.pubkey();
+        for (index, provider) in self.providers.iter().enumerate() {
+            send(
+                &mut self.svm,
+                &[instruction(
+                    inference_router_program::ID,
+                    accounts::RegisterOffer {
+                        market: self.market,
+                        model: self.model,
+                        terms: self.terms,
+                        capacity: self.capacity,
+                        profile: profile(provider.pubkey()),
+                        provider: provider.pubkey(),
+                        payout: self.payouts[index],
+                    },
+                    ix::RegisterOffer {
+                        offer: offer(index as u32),
+                    },
+                )],
+                &self.payer,
+                &[provider],
+            )
+            .unwrap();
+        }
+    }
 }

@@ -134,6 +134,16 @@ function executionFixture() {
   return { ...value, buffer };
 }
 
+test.each([false, true])("upgrade fee reserve scales with artifact upload and separate payer %s", async separatePayer => {
+  const { config, path, rpc, artifact } = upgradeFixture();
+  const bytes = 1_122_856;
+  writeFileSync(path, Buffer.concat([artifact, Buffer.alloc(bytes - artifact.length)]));
+  if (separatePayer) config.operator = { payer: "unread-plan-only-key.json" };
+  const result = await upgrade(config, false, rpc, path);
+  const expected = 2_000_000 + 2_194 * (separatePayer ? 2 : 1) * 5_000;
+  expect(result).toMatchObject({ bytes, feeReserveLamports: expected });
+});
+
 test("ELF validation checks complete headers, tables, segments, sections, and SBF entry point", () => {
   validateElf(elf());
   for (const bytes of [4, 63, 119, 127, 255]) expect(() => validateElf(elf().subarray(0, bytes))).toThrow("ELF");
@@ -243,9 +253,10 @@ test.each([0, 1234, 5000])("retained valid buffer retry funds only missing rent,
   const retained = account(bufferData(artifact.length), LOADER); retained.lamports = lamports;
   accounts.set(buffer.publicKey.toBase58(), retained);
   const missing = Math.max(0, (artifact.length + LOADER_BUFFER_CODEC.fixedSize) * 10 - lamports);
-  rpc.getBalance = async () => 2_000_000 + missing;
+  const feeReserve = 2_000_000 + Math.ceil(artifact.length / 512) * 5_000;
+  rpc.getBalance = async () => feeReserve + missing;
   const result = await upgrade(config, true, rpc, path, async () => { data.data = programData(artifact); });
-  expect(result).toMatchObject({ temporaryBufferLamports: missing, bufferFundingEstimated: false, requiredLamports: 2_000_000 + missing, finalized: true, shortfallLamports: 0 });
+  expect(result).toMatchObject({ temporaryBufferLamports: missing, bufferFundingEstimated: false, feeReserveLamports: feeReserve, requiredLamports: feeReserve + missing, finalized: true, shortfallLamports: 0 });
 });
 
 test("retained buffers with wrong owner, executable flag, state, authority, or size fail before CLI", async () => {

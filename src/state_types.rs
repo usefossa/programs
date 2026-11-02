@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 pub const URI_MAX: usize = 256;
 pub const MAX_ENTRIES: usize = 4096;
-pub const MAX_BOOK_GROWTH: usize = 10_240 / core::mem::size_of::<TermsEntry>();
+pub const MAX_BOOK_GROWTH: usize = 10_240 / core::mem::size_of::<LegacyTermsEntry>();
 pub const MODALITY_TEXT: u8 = 1;
 pub const MODALITY_IMAGE: u8 = 2;
 pub const MODALITY_AUDIO: u8 = 4;
@@ -53,7 +53,7 @@ pub struct Provider {
     pub authority: Address,
     pub document_hash: [u8; 32],
     pub uri_len: PodU16,
-    pub reserved: u8,
+    pub policy_registered: u8,
     pub bump: u8,
     pub uri: [u8; URI_MAX],
 }
@@ -94,13 +94,13 @@ pub struct User {
 }
 
 #[account]
-pub struct FilteredTerms {
+pub struct BookingTerms {
     pub model: Address,
     pub limit: PodU32,
 }
 
 // new discriminator prevents old slab entries from being read with a different stride.
-pub type Terms = FilteredTerms;
+pub type Terms = BookingTerms;
 
 #[account]
 pub struct Capacity {
@@ -128,6 +128,7 @@ pub struct TermsEntry {
     pub context_window: PodU32,
     pub max_input: PodU32,
     pub max_output: PodU32,
+    pub provider_policy: PodU32,
 }
 
 #[repr(C)]
@@ -160,7 +161,8 @@ pub struct FilteredBooking {
     pub max_input: PodU32,
     pub max_output: PodU32,
     pub claim_end: PodI64,
-    pub reserved: [u8; 8],
+    pub provider_policy: PodU32,
+    pub reserved: [u8; 4],
     pub status: u8,
     pub reserved2: [u8; 3],
     pub generation: PodU64,
@@ -176,7 +178,7 @@ pub struct FilteredBooking {
     pub payout: Address,
     pub provider_list: Address,
     pub slot: PodU32,
-    pub reserved4: u8,
+    pub wallet_booking_counted: u8,
     pub requested_privacy: u8,
     pub cache_allowed: u8,
     pub reserved5: u8,
@@ -198,7 +200,7 @@ pub struct FilteredBooking {
     pub requested_output_modalities: u8,
 }
 
-// existing bookings require a separate migration before this layout can be deployed.
+// legacy zero markers remain settleable; new reservations always record wallet usage.
 pub type Booking = FilteredBooking;
 
 #[repr(C)]
@@ -210,4 +212,168 @@ pub struct Receipt {
     pub generation: PodU64,
     pub charge: PodU64,
     pub claim_end: PodI64,
+}
+
+#[account]
+pub struct BookingPolicies {
+    pub market: Address,
+    pub limited_providers: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct BookingPolicy {
+    pub provider: Address,
+    pub wallet_window_seconds: PodU32,
+    pub wallet_bookings_per_window: PodU32,
+    pub wallet_booking_capacity: PodU32,
+}
+
+#[account]
+pub struct WalletBookings {
+    pub market: Address,
+    pub owner: Address,
+    pub rent_payer: Address,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct WalletBookingEntry {
+    pub provider_policy: PodU32,
+    pub window_end: PodI64,
+    pub bookings: PodU32,
+    pub outstanding: PodU32,
+}
+
+#[account]
+pub struct ProviderPolicy {
+    pub market: Address,
+    pub provider: Address,
+    pub wallet_window_seconds: PodU32,
+    pub wallet_bookings_per_window: PodU32,
+    pub wallet_booking_capacity: PodU32,
+    pub epoch: PodU64,
+    pub active_mirrors: PodU32,
+    pub updating: u8,
+    pub bump: u8,
+    pub reserved: [u8; 2],
+}
+
+#[account]
+pub struct ListRouting {
+    pub market: Address,
+    pub list: Address,
+    pub book_count: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct PolicyMirror {
+    pub provider: Address,
+    pub wallet_window_seconds: PodU32,
+    pub wallet_bookings_per_window: PodU32,
+    pub wallet_booking_capacity: PodU32,
+    pub epoch: PodU64,
+    pub active: u8,
+    pub reserved: [u8; 3],
+}
+
+#[account]
+pub struct ProviderModelCapacity {
+    pub model: Address,
+    pub provider: Address,
+    pub total: PodU32,
+    pub allocated: PodU32,
+    pub legacy_active: PodU32,
+    pub legacy_slot: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[account]
+pub struct ListTerms {
+    pub model: Address,
+    pub list: Address,
+    pub capacity: Address,
+    pub limit: PodU32,
+    pub next_order: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct ListOffer {
+    pub terms: TermsEntry,
+    pub order: PodU32,
+}
+
+#[account]
+pub struct ListCapacity {
+    pub model: Address,
+    pub list: Address,
+    pub terms: Address,
+    pub limit: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct ListCapacityEntry {
+    pub provider: Address,
+    pub active: PodU32,
+}
+
+#[account]
+pub struct ProviderWallet {
+    pub market: Address,
+    pub owner: Address,
+    pub rent_payer: Address,
+    pub bump: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct ProviderUsage {
+    pub provider: Address,
+    pub window_end: PodI64,
+    pub bookings: PodU32,
+    pub outstanding: PodU32,
+}
+
+// deployed offer layout remains readable while old reservations drain.
+#[account]
+pub struct FilteredTerms {
+    pub model: Address,
+    pub limit: PodU32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct LegacyTermsEntry {
+    pub provider: Address,
+    pub payout: Address,
+    pub checkpoint: [u8; 32],
+    pub input_rate: PodU32,
+    pub cached_rate: PodU32,
+    pub output_rate: PodU32,
+    pub speed: PodU16,
+    pub privacy: u8,
+    pub active: u8,
+    pub input_modalities: u8,
+    pub output_modalities: u8,
+    pub version: u8,
+    pub reserved: u8,
+    pub capacity: PodU32,
+    pub context_window: PodU32,
+    pub max_input: PodU32,
+    pub max_output: PodU32,
 }

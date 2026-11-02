@@ -1,7 +1,9 @@
 use crate::{
     args::{valid_modalities, ReserveRequest},
     helpers::{fee, require},
-    state_types::{CapacityEntry, TermsEntry, MAX_ENTRIES, MODALITIES, OFFER_VERSION},
+    state_types::{
+        CapacityEntry, LegacyTermsEntry as TermsEntry, MAX_ENTRIES, MODALITIES, OFFER_VERSION,
+    },
     CLAIM_SECONDS,
 };
 use anchor_lang::prelude::{Address, ProgramError};

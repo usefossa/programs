@@ -1,21 +1,23 @@
 use crate::{
     args::{Claim, ReserveRequest},
-    helpers::{add, bps_ceil, dec, fee, fee_budget, inc, require, sub},
+    helpers::{add, bps_ceil, fee, fee_budget, inc, require, sub},
     matching::select,
     receipt,
-    state_types::{Booking, Capacity, CapacityEntry, User},
+    state_types::{Booking, Capacity, CapacityEntry, Model, User},
     token::{token_owned_by, user_payments, user_transfer, vault_owned_by},
     CLAIM_SECONDS,
 };
 use anchor_lang::accounts::Slab;
-use anchor_lang::prelude::{Account, Address, Clock, ProgramError, ProgramResult};
+use anchor_lang::prelude::{
+    Account, Address, Clock, ProgramError, ProgramResult, UncheckedAccount,
+};
 use anchor_lang::solana_program::sysvar::Sysvar as _;
 use anchor_lang::{AccountClose, AnchorAccount, ToCpiHandle, ToCpiHandleMut};
 
-fn capacity<'a>(
-    book: &'a mut Slab<Capacity, CapacityEntry>,
+fn capacity(
+    book: &mut Slab<Capacity, CapacityEntry>,
     slot: u32,
-) -> Result<&'a mut CapacityEntry, ProgramError> {
+) -> Result<&mut CapacityEntry, ProgramError> {
     require(
         book.len() <= book.limit.get() as usize,
         crate::RouterError::InvalidAccount,
@@ -30,6 +32,10 @@ pub(crate) fn reserve(
     request: &ReserveRequest,
     generation: Option<u64>,
 ) -> ProgramResult {
+    require(
+        ctx.accounts.market.reserved[0] == 0,
+        crate::RouterError::InvalidState,
+    )?;
     require(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,
@@ -109,7 +115,8 @@ pub(crate) fn reserve(
     accounts.booking.max_input = request.max_input.into();
     accounts.booking.max_output = request.max_output.into();
     accounts.booking.claim_end = claim_end.into();
-    accounts.booking.reserved = [0; 8];
+    accounts.booking.provider_policy = 0.into();
+    accounts.booking.reserved = [0; 4];
     accounts.booking.status = 0;
     accounts.booking.reserved2 = [0; 3];
     accounts.booking.generation = generation.into();
@@ -125,7 +132,7 @@ pub(crate) fn reserve(
     accounts.booking.payout = terms.payout;
     accounts.booking.provider_list = *accounts.list.address();
     accounts.booking.slot = chosen.slot.into();
-    accounts.booking.reserved4 = 0;
+    accounts.booking.wallet_booking_counted = 0;
     accounts.booking.requested_privacy = u8::from(request.private);
     accounts.booking.cache_allowed = u8::from(chosen.cache);
     accounts.booking.reserved5 = 0;
@@ -148,14 +155,50 @@ pub(crate) fn reserve(
     Ok(())
 }
 
-#[inline(always)]
 pub(crate) fn claim(
     ctx: &mut anchor_lang::Context<crate::contexts::ClaimBooking>,
     claim: &Claim,
 ) -> ProgramResult {
+    require(
+        ctx.accounts.booking.wallet_booking_counted == 0,
+        crate::RouterError::InvalidState,
+    )?;
     let mut remaining = ctx.remaining_accounts()?;
-    let destinations = remaining.as_mut_slice();
-    let accounts = &mut ctx.accounts;
+    claim_core(
+        &mut ctx.accounts,
+        None,
+        remaining.as_mut_slice(),
+        ctx.program_id,
+        claim,
+    )
+}
+
+pub(crate) fn claim_list(
+    ctx: &mut anchor_lang::Context<crate::contexts::ClaimListBooking>,
+    claim: &Claim,
+) -> ProgramResult {
+    require(
+        ctx.accounts.base.booking.wallet_booking_counted > 0,
+        crate::RouterError::InvalidState,
+    )?;
+    let mut remaining = ctx.remaining_accounts()?;
+    claim_core(
+        &mut ctx.accounts.base,
+        Some(&mut ctx.accounts.wallet_bookings),
+        remaining.as_mut_slice(),
+        ctx.program_id,
+        claim,
+    )
+}
+
+#[inline(always)]
+fn claim_core(
+    accounts: &mut crate::contexts::ClaimBooking,
+    wallet_bookings: Option<&mut UncheckedAccount>,
+    destinations: &mut [anchor_lang::prelude::AccountView],
+    program_id: &Address,
+    claim: &Claim,
+) -> ProgramResult {
     require(
         destinations.len()
             == if accounts.booking.fee_bps.get() > 0 {
@@ -167,8 +210,8 @@ pub(crate) fn claim(
     )?;
     require(
         accounts.booking.status == 0
-            && accounts.booking.reserved == [0; 8]
-            && accounts.booking.reserved4 == 0
+            && accounts.booking.reserved == [0; 4]
+            && accounts.booking.wallet_booking_counted <= 2
             && accounts.booking.reserved5 == 0
             && Clock::get()?.unix_timestamp <= accounts.booking.claim_end.get(),
         crate::RouterError::InvalidState,
@@ -241,8 +284,12 @@ pub(crate) fn claim(
         accounts.booking.reserve.get() - charge,
     )?
     .into();
-    let capacity = capacity(&mut accounts.capacity, accounts.booking.slot.get())?;
-    capacity.active = dec(capacity.active.get())?.into();
+    super::scoped::settle(
+        &mut accounts.capacity,
+        wallet_bookings,
+        &accounts.model,
+        &accounts.booking,
+    )?;
     if !destinations.is_empty() {
         let payout = accounts.payout.try_to_cpi_handle_mut()?;
         let (creator, protocol) = destinations.split_at_mut(1);
@@ -269,7 +316,7 @@ pub(crate) fn claim(
             ],
             accounts.user.address(),
             accounts.user.bump,
-            ctx.program_id,
+            program_id,
         )?;
     } else if provider_charge > 0 {
         user_transfer(
@@ -281,7 +328,7 @@ pub(crate) fn claim(
             ),
             accounts.user.address(),
             accounts.user.bump,
-            ctx.program_id,
+            program_id,
             provider_charge,
         )?;
     }
@@ -305,9 +352,11 @@ pub(crate) fn claim(
 }
 
 fn release_core(
-    capacity_book: &mut Slab<Capacity, CapacityEntry>,
+    capacity_book: &mut UncheckedAccount,
+    model: &Account<Model>,
     user_state: &mut Account<User>,
     booking: &mut Account<Booking>,
+    wallet_bookings: Option<&mut UncheckedAccount>,
     provider_release: bool,
     requested_generation: Option<u64>,
 ) -> ProgramResult {
@@ -327,8 +376,7 @@ fn release_core(
             crate::RouterError::InvalidState,
         )?;
     }
-    let entry = capacity(capacity_book, booking.slot.get())?;
-    entry.active = dec(entry.active.get())?.into();
+    super::scoped::settle(capacity_book, wallet_bookings, model, booking)?;
     user_state.free = add(user_state.free.get(), booking.reserve.get())?.into();
     booking.status = if generation == 0 {
         3
@@ -346,11 +394,42 @@ pub(crate) fn expire(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,
     )?;
-    let accounts = &mut ctx.accounts;
+    let a = &mut ctx.accounts;
+    require(
+        a.booking.wallet_booking_counted == 0,
+        crate::RouterError::InvalidState,
+    )?;
     release_core(
-        &mut accounts.capacity,
-        &mut accounts.user,
-        &mut accounts.booking,
+        &mut a.capacity,
+        &a.model,
+        &mut a.user,
+        &mut a.booking,
+        None,
+        false,
+        generation,
+    )
+}
+
+pub(crate) fn expire_list(
+    ctx: &mut anchor_lang::Context<crate::contexts::ExpireListBooking>,
+    generation: Option<u64>,
+) -> ProgramResult {
+    require(
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
+    )?;
+    let a = &mut ctx.accounts;
+    require(
+        a.base.booking.wallet_booking_counted > 0,
+        crate::RouterError::InvalidState,
+    )?;
+    let base = &mut *a.base;
+    release_core(
+        &mut base.capacity,
+        &base.model,
+        &mut base.user,
+        &mut base.booking,
+        Some(&mut a.wallet_bookings),
         false,
         generation,
     )
@@ -364,11 +443,42 @@ pub(crate) fn release(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,
     )?;
-    let accounts = &mut ctx.accounts;
+    let a = &mut ctx.accounts;
+    require(
+        a.booking.wallet_booking_counted == 0,
+        crate::RouterError::InvalidState,
+    )?;
     release_core(
-        &mut accounts.capacity,
-        &mut accounts.user,
-        &mut accounts.booking,
+        &mut a.capacity,
+        &a.model,
+        &mut a.user,
+        &mut a.booking,
+        None,
+        true,
+        generation,
+    )
+}
+
+pub(crate) fn release_list(
+    ctx: &mut anchor_lang::Context<crate::contexts::ReleaseListBooking>,
+    generation: Option<u64>,
+) -> ProgramResult {
+    require(
+        ctx.remaining_accounts()?.is_empty(),
+        crate::RouterError::InvalidArgument,
+    )?;
+    let a = &mut ctx.accounts;
+    require(
+        a.base.booking.wallet_booking_counted > 0,
+        crate::RouterError::InvalidState,
+    )?;
+    let base = &mut *a.base;
+    release_core(
+        &mut base.capacity,
+        &base.model,
+        &mut base.user,
+        &mut base.booking,
+        Some(&mut a.wallet_bookings),
         true,
         generation,
     )

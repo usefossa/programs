@@ -7,6 +7,11 @@ use anchor_lang::{
 use inference_router_program::{accounts, args, instruction as ix, state_types};
 use solana_account::ReadableAccount;
 
+#[path = "booking_lifecycle_cu.rs"]
+mod lifecycle;
+#[path = "scoped_cu.rs"]
+mod scoped_bench;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {
     Compatible,
@@ -56,8 +61,13 @@ fn support(entry: &mut state_types::TermsEntry, case: Case, compatible: bool) {
     }
 }
 
-fn store_slab<H, T>(svm: &mut LiteSVM, address: Address, header: &H, entries: &[T], capacity: u32)
-where
+pub(super) fn store_slab<H, T>(
+    svm: &mut LiteSVM,
+    address: Address,
+    header: &H,
+    entries: &[T],
+    capacity: u32,
+) where
     H: Discriminator + Owner + Pod + Zeroable + SlabSchema,
     T: Pod,
 {
@@ -145,6 +155,7 @@ fn fixture(
         let rate = rank as u32 * 1_000_000;
         let mut entry = state_types::TermsEntry {
             provider,
+            provider_policy: (index as u32).into(),
             payout: Address::new_from_array([34; 32]),
             input_rate: rate.into(),
             cached_rate: (if cached { rate / 2 } else { rate }).into(),
@@ -162,6 +173,33 @@ fn fixture(
         );
         offers.push(entry);
     }
+    let (policies, policy_bump) = Address::find_program_address(
+        &[b"booking_policies", market.as_ref()],
+        &inference_router_program::ID,
+    );
+    let mut policy_header = state_types::BookingPolicies::zeroed();
+    policy_header.market = market;
+    policy_header.bump = policy_bump;
+    let policy_entries: Vec<_> = offers
+        .iter()
+        .map(|offer| state_types::BookingPolicy {
+            provider: offer.provider,
+            wallet_window_seconds: 60.into(),
+            wallet_bookings_per_window: 0.into(),
+            wallet_booking_capacity: 0.into(),
+        })
+        .collect();
+    store_slab(svm, policies, &policy_header, &policy_entries, count as u32);
+    let (wallet_bookings, wallet_bump) = Address::find_program_address(
+        &[b"wallet_bookings", market.as_ref(), payer.pubkey().as_ref()],
+        &inference_router_program::ID,
+    );
+    let mut wallet_header = state_types::WalletBookings::zeroed();
+    wallet_header.market = market;
+    wallet_header.owner = payer.pubkey();
+    wallet_header.rent_payer = payer.pubkey();
+    wallet_header.bump = wallet_bump;
+    store_slab::<_, state_types::WalletBookingEntry>(svm, wallet_bookings, &wallet_header, &[], 8);
     providers.sort_unstable();
     match case {
         Case::UnlistedCheapest | Case::UnlistedPadded => providers.retain(|provider| {
@@ -253,25 +291,36 @@ fn fixture(
         limits_configured: false,
     };
     (
-        instruction(
-            inference_router_program::ID,
-            accounts::ReserveBooking {
-                market,
-                model,
-                terms,
-                capacity,
-                user,
-                owner: payer.pubkey(),
-                booking,
-                rent_payer: payer.pubkey(),
-                list,
-                group: None,
-            },
-            ix::ReserveBooking {
-                request,
-                generation: None,
-            },
-        ),
+        {
+            let mut ix = instruction(
+                inference_router_program::ID,
+                accounts::ReserveBooking {
+                    market,
+                    model,
+                    terms,
+                    capacity,
+                    user,
+                    owner: payer.pubkey(),
+                    booking,
+                    rent_payer: payer.pubkey(),
+                    list,
+                    group: None,
+                },
+                ix::ReserveBooking {
+                    request,
+                    generation: None,
+                },
+            );
+            ix.accounts.insert(
+                9,
+                solana_instruction::AccountMeta::new_readonly(policies, false),
+            );
+            ix.accounts.insert(
+                10,
+                solana_instruction::AccountMeta::new(wallet_bookings, false),
+            );
+            ix
+        },
         booking,
     )
 }
@@ -465,4 +514,184 @@ fn offer_filter_cu_benchmark() {
         std::mem::size_of::<state_types::TermsEntry>(),
         state_types::Booking::DISCRIMINATOR.len() + std::mem::size_of::<state_types::Booking>()
     );
+}
+
+#[test]
+#[ignore = "explicit booking policy SBF CU comparison"]
+fn wallet_booking_cu_benchmark() {
+    let mut svm = LiteSVM::new();
+    let mut budget = solana_compute_budget::compute_budget::ComputeBudget::new_with_defaults(true);
+    budget.compute_unit_limit = 1_400_000;
+    svm = svm.with_compute_budget(budget);
+    svm.add_program_from_file(
+        inference_router_program::ID,
+        program_path("inference_router_program.so"),
+    )
+    .unwrap();
+    let payer = Keypair::new_from_array([71; 32]);
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    for count in [32usize, 4096] {
+        for descending in [false, true] {
+            for scenario in [
+                "enabled_empty",
+                "enabled_dense",
+                "enabled_sparse",
+                "skip_cheapest",
+                "all_exhausted",
+                "all_exhausted_sparse",
+                "last_eligible",
+                "last_eligible_sparse",
+            ] {
+                let (reserve, booking) =
+                    fixture(&mut svm, &payer, count, descending, Case::Compatible, false);
+                let policies = reserve.accounts[9].pubkey;
+                let wallet = reserve.accounts[10].pubkey;
+                let mut policy_account = svm.get_account(&policies).unwrap();
+                policy_account.data[40..44].copy_from_slice(&(count as u32).to_le_bytes());
+                let policy_entries: &mut [state_types::BookingPolicy] =
+                    anchor_lang::bytemuck::cast_slice_mut(&mut policy_account.data[52..]);
+                for entry in policy_entries {
+                    entry.wallet_bookings_per_window = 10.into();
+                    entry.wallet_booking_capacity = 10.into();
+                }
+                let offset = if scenario.ends_with("sparse") {
+                    count
+                } else {
+                    0
+                };
+                if offset != 0 {
+                    let entries =
+                        anchor_lang::bytemuck::cast_slice::<_, state_types::BookingPolicy>(
+                            &policy_account.data[52..],
+                        )
+                        .to_vec();
+                    let mut all_entries = entries.clone();
+                    for (index, entry) in all_entries.iter_mut().enumerate() {
+                        let mut bytes = [99; 32];
+                        bytes[..4].copy_from_slice(&(index as u32).to_le_bytes());
+                        entry.provider = Address::new_from_array(bytes);
+                    }
+                    all_entries.extend(entries);
+                    let header = state_types::BookingPolicies::try_deserialize(
+                        &mut &policy_account.data[..],
+                    )
+                    .unwrap();
+                    let mut header = header;
+                    header.limited_providers = (all_entries.len() as u32).into();
+                    store_slab(
+                        &mut svm,
+                        policies,
+                        &header,
+                        &all_entries,
+                        all_entries.len() as u32,
+                    );
+                    let terms = reserve.accounts[2].pubkey;
+                    let mut account = svm.get_account(&terms).unwrap();
+                    for (index, entry) in anchor_lang::bytemuck::cast_slice_mut::<
+                        _,
+                        state_types::TermsEntry,
+                    >(&mut account.data[48..])
+                    .iter_mut()
+                    .enumerate()
+                    {
+                        entry.provider_policy = ((index + offset) as u32).into();
+                    }
+                    svm.set_account(terms, account).unwrap();
+                } else {
+                    svm.set_account(policies, policy_account).unwrap();
+                }
+                let mut header = state_types::WalletBookings::zeroed();
+                header.market = reserve.accounts[0].pubkey;
+                header.owner = payer.pubkey();
+                header.rent_payer = payer.pubkey();
+                header.bump = Address::find_program_address(
+                    &[
+                        b"wallet_bookings",
+                        header.market.as_ref(),
+                        header.owner.as_ref(),
+                    ],
+                    &inference_router_program::ID,
+                )
+                .1;
+                let cheapest = if descending { count - 1 } else { 0 };
+                let entries: Vec<_> = (0..if scenario == "enabled_empty" {
+                    0
+                } else {
+                    count
+                })
+                    .map(|index| {
+                        let exhausted = scenario.starts_with("all_exhausted")
+                            || scenario.starts_with("last_eligible") && index + 1 < count
+                            || scenario == "skip_cheapest" && index == cheapest;
+                        state_types::WalletBookingEntry {
+                            provider_policy: ((index + offset) as u32).into(),
+                            window_end: i64::MAX.into(),
+                            bookings: (if exhausted { 10 } else { 1 }).into(),
+                            outstanding: 0.into(),
+                        }
+                    })
+                    .collect();
+                store_slab(
+                    &mut svm,
+                    wallet,
+                    &header,
+                    &entries,
+                    if entries.is_empty() { 8 } else { count as u32 },
+                );
+                let transaction = Transaction::new(
+                    &[&payer],
+                    Message::new(&[reserve], Some(&payer.pubkey())),
+                    svm.latest_blockhash(),
+                );
+                let mut samples = vec![];
+                let mut loaded = 0;
+                let mut exhausted_cu = false;
+                for _ in 0..3 {
+                    match svm.simulate_transaction(transaction.clone()) {
+                        Ok(result) => {
+                            assert!(!scenario.starts_with("all_exhausted"));
+                            let post = &result
+                                .post_accounts
+                                .iter()
+                                .find(|(address, _)| *address == booking)
+                                .unwrap()
+                                .1;
+                            let booked =
+                                state_types::Booking::try_deserialize(&mut post.data()).unwrap();
+                            assert_eq!(
+                                booked.slot.get() as usize,
+                                if scenario.starts_with("last_eligible") {
+                                    count - 1
+                                } else if scenario == "skip_cheapest" {
+                                    if descending {
+                                        count - 2
+                                    } else {
+                                        1
+                                    }
+                                } else {
+                                    cheapest
+                                }
+                            );
+                            loaded = result.meta.loaded_accounts_data_size;
+                            samples.push(result.meta.compute_units_consumed);
+                        }
+                        Err(error) => {
+                            exhausted_cu = error.meta.compute_units_consumed == 1_400_000;
+                            assert!(
+                                exhausted_cu || scenario.starts_with("all_exhausted"),
+                                "{scenario}: {error:?}"
+                            );
+                            if !exhausted_cu {
+                                assert!(format!("{:?}", error.err).contains("Custom(6005)"));
+                            }
+                            loaded = error.meta.loaded_accounts_data_size;
+                            samples.push(error.meta.compute_units_consumed);
+                        }
+                    }
+                }
+                assert!(samples.iter().all(|sample| *sample == samples[0]));
+                eprintln!("WALLET_CU scenario={scenario} offers={count} order={} cu={} samples=3 loaded_bytes={loaded} status={}", if descending {"last"} else {"first"}, samples[0], if exhausted_cu {"exhausted"} else {"complete"});
+            }
+        }
+    }
 }

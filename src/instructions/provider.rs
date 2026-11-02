@@ -1,7 +1,7 @@
 use crate::{
     args::{Metadata, Offer},
     helpers::require,
-    state_types::{CapacityEntry, TermsEntry, OFFER_VERSION},
+    state_types::{CapacityEntry, LegacyTermsEntry as TermsEntry, OFFER_VERSION},
 };
 use anchor_lang::prelude::ProgramResult;
 use anchor_lang::AnchorAccount;
@@ -11,6 +11,10 @@ pub(crate) fn register_offer(
     ctx: &mut anchor_lang::Context<crate::contexts::RegisterOffer>,
     offer: &Offer,
 ) -> ProgramResult {
+    require(
+        ctx.accounts.market.reserved[0] == 0,
+        crate::RouterError::InvalidState,
+    )?;
     crate::helpers::require(
         ctx.remaining_accounts()?.is_empty(),
         crate::RouterError::InvalidArgument,

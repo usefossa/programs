@@ -113,8 +113,9 @@ export async function upgrade(
     rpc.getMinimumBalanceForRentExemption(artifact.length + LOADER_BUFFER_CODEC.fixedSize),
     config.operator?.payer ? Promise.resolve(null) : rpc.getBalance(expected),
   ]);
-  const extensionLamports = Math.max(0, rent - data!.lamports), required = extensionLamports + bufferRent + 2_000_000;
-  const plan = { program: program.toBase58(), authority: expected.toBase58(), artifactSha256: hash, bytes: artifact.length, extensionBytes, extensionLamports, temporaryBufferLamports: bufferRent, bufferFundingEstimated: true, feeReserveLamports: 2_000_000, balanceLamports: balance, requiredLamports: required, shortfallLamports: balance === null ? null : Math.max(0, required - balance) };
+  const feeReserveLamports = 2_000_000 + Math.ceil(artifact.length / 512) * (config.operator?.payer ? 2 : 1) * 5_000;
+  const extensionLamports = Math.max(0, rent - data!.lamports), required = extensionLamports + bufferRent + feeReserveLamports;
+  const plan = { program: program.toBase58(), authority: expected.toBase58(), artifactSha256: hash, bytes: artifact.length, extensionBytes, extensionLamports, temporaryBufferLamports: bufferRent, bufferFundingEstimated: true, feeReserveLamports, balanceLamports: balance, requiredLamports: required, shortfallLamports: balance === null ? null : Math.max(0, required - balance) };
   if (!execute) return plan;
   const keys: Signer[] = [];
   let snapshot: string | undefined;

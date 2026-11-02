@@ -45,7 +45,7 @@ pub struct RegisterOffer {
         address = model.terms @ crate::RouterError::InvalidAccount,
         constraint = terms.model == *model.address() @ crate::RouterError::InvalidAccount
     )]
-    pub terms: Slab<Terms, TermsEntry>,
+    pub terms: Slab<FilteredTerms, LegacyTermsEntry>,
     #[account(
         mut,
         address = model.capacity @ crate::RouterError::InvalidAccount,
@@ -113,7 +113,7 @@ pub struct UpdateOffer {
         constraint = terms.model == *model.address() @ crate::RouterError::InvalidAccount,
         constraint = terms.limit.get() == model.limit.get() @ crate::RouterError::InvalidAccount
     )]
-    pub terms: Slab<Terms, TermsEntry>,
+    pub terms: Slab<FilteredTerms, LegacyTermsEntry>,
     pub signer: Signer,
 }
 
@@ -131,7 +131,7 @@ pub struct ReserveBooking {
         constraint = terms.model == *model.address() @ crate::RouterError::InvalidAccount,
         constraint = terms.limit.get() == model.limit.get() @ crate::RouterError::InvalidAccount
     )]
-    pub terms: Slab<Terms, TermsEntry>,
+    pub terms: Slab<FilteredTerms, LegacyTermsEntry>,
     #[account(
         mut,
         address = model.capacity @ crate::RouterError::InvalidAccount,
@@ -165,18 +165,12 @@ pub struct ReserveBooking {
 pub struct ClaimBooking {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
         constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
     pub model: Account<Model>,
-    #[account(
-        mut,
-        address = model.capacity @ crate::RouterError::InvalidAccount,
-        constraint = capacity.model == *model.address() @ crate::RouterError::InvalidAccount,
-        constraint = capacity.limit.get() == model.limit.get() @ crate::RouterError::InvalidAccount
-    )]
-    pub capacity: Slab<Capacity, CapacityEntry>,
+    // booking version selects a typed legacy or list-local slab in settlement.
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub capacity: UncheckedAccount,
     #[account(
         mut,
         address = booking.user @ crate::RouterError::InvalidAccount,
@@ -215,18 +209,12 @@ pub struct ClaimBooking {
 pub struct ExpireBooking {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
         constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
     pub model: Account<Model>,
-    #[account(
-        mut,
-        address = model.capacity @ crate::RouterError::InvalidAccount,
-        constraint = capacity.model == *model.address() @ crate::RouterError::InvalidAccount,
-        constraint = capacity.limit.get() == model.limit.get() @ crate::RouterError::InvalidAccount
-    )]
-    pub capacity: Slab<Capacity, CapacityEntry>,
+    // booking version selects a typed legacy or list-local slab in settlement.
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub capacity: UncheckedAccount,
     #[account(
         mut,
         address = booking.user @ crate::RouterError::InvalidAccount,
@@ -267,18 +255,12 @@ pub struct Withdraw {
 pub struct ReleaseBooking {
     pub market: Account<Market>,
     #[account(
-        seeds = [b"model", market.address().as_ref(), model.model_id.as_ref()],
-        bump = model.bump,
         constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount
     )]
     pub model: Account<Model>,
-    #[account(
-        mut,
-        address = model.capacity @ crate::RouterError::InvalidAccount,
-        constraint = capacity.model == *model.address() @ crate::RouterError::InvalidAccount,
-        constraint = capacity.limit.get() == model.limit.get() @ crate::RouterError::InvalidAccount
-    )]
-    pub capacity: Slab<Capacity, CapacityEntry>,
+    // booking version selects a typed legacy or list-local slab in settlement.
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub capacity: UncheckedAccount,
     #[account(
         mut,
         address = booking.user @ crate::RouterError::InvalidAccount,
@@ -332,9 +314,9 @@ pub struct InitializeModel {
     #[account(
         init,
         payer = payer,
-        space = Slab::<Terms, TermsEntry>::space_for(_limit)
+        space = Slab::<FilteredTerms, LegacyTermsEntry>::space_for(_limit)
     )]
-    pub terms: Slab<Terms, TermsEntry>,
+    pub terms: Slab<FilteredTerms, LegacyTermsEntry>,
     #[account(
         init,
         payer = payer,
@@ -480,7 +462,7 @@ pub struct GrowBooks {
         address = model.terms @ crate::RouterError::InvalidAccount,
         constraint = terms.model == *model.address() @ crate::RouterError::InvalidAccount
     )]
-    pub terms: Slab<Terms, TermsEntry>,
+    pub terms: Slab<FilteredTerms, LegacyTermsEntry>,
     #[account(
         mut,
         address = model.capacity @ crate::RouterError::InvalidAccount,
@@ -790,4 +772,25 @@ pub struct RotateCouncil {
     pub market: Account<Market>,
     pub current: Signer,
     pub next: Signer,
+}
+
+#[derive(Accounts)]
+pub struct ClaimListBooking {
+    pub base: Nested<ClaimBooking>,
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub wallet_bookings: UncheckedAccount,
+}
+
+#[derive(Accounts)]
+pub struct ReleaseListBooking {
+    pub base: Nested<ReleaseBooking>,
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub wallet_bookings: UncheckedAccount,
+}
+
+#[derive(Accounts)]
+pub struct ExpireListBooking {
+    pub base: Nested<ExpireBooking>,
+    #[account(mut, owner = crate::ID @ crate::RouterError::InvalidAccount)]
+    pub wallet_bookings: UncheckedAccount,
 }
