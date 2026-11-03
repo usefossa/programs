@@ -5,6 +5,7 @@ struct ScopedFixture {
     routing: Address,
     terms: Address,
     capacity: Address,
+    page: Address,
     wallet: Address,
     policies: [Address; 2],
     budgets: [Address; 2],
@@ -12,6 +13,76 @@ struct ScopedFixture {
 
 fn pda(seeds: &[&[u8]]) -> Address {
     Address::find_program_address(seeds, &inference_router_program::ID).0
+}
+
+#[test]
+fn provider_limits_cutover_rejects_old_indices_until_authenticated_and_drained() {
+    use crate::tests::offer_filter_cu::store_slab;
+    let mut s = ScopedFixture::new();
+    let mut market: state_types::Market = account(&s.f.svm, s.f.market);
+    market.reserved[0] = 1;
+    store_account(&mut s.f.svm, s.f.market, &market);
+    let mut header: state_types::ListTerms = account(&s.f.svm, s.terms);
+    header.limits_version = 0;
+    let stored = s.f.svm.get_account(&s.terms).unwrap();
+    let offset = Slab::<state_types::ListTerms, state_types::ListOffer>::space_for(0);
+    let mut offers =
+        anchor_lang::bytemuck::cast_slice::<_, state_types::ListOffer>(&stored.data[offset..])
+            .to_vec();
+    for (index, row) in offers.iter_mut().enumerate() {
+        row.terms.version = state_types::OFFER_VERSION;
+        row.terms.provider_policy = (index as u32).into();
+    }
+    store_slab(&mut s.f.svm, s.terms, &header, &offers, 2);
+    let reserve = s.reserve(1);
+    assert!(format!("{:?}", s.send(reserve).unwrap_err().err).contains("Custom(6006)"));
+    let activation = |council| {
+        instruction(
+            inference_router_program::ID,
+            accounts::ActivateProviderLimits {
+                market: s.f.market,
+                council,
+            },
+            ix::ActivateProviderLimits {},
+        )
+    };
+    let wrong = activation(s.f.providers[0].pubkey());
+    let activate = activation(s.f.payer.pubkey());
+    assert!(format!("{:?}", s.provider_send(wrong, 0).unwrap_err().err).contains("Custom(6003)"));
+    s.send(activate).unwrap();
+    let set = s.set(0, offer(0));
+    s.provider_send(set, 0).unwrap();
+    assert_eq!(
+        account::<state_types::ListTerms>(&s.f.svm, s.terms).limits_version,
+        0
+    );
+    let mut old_capacity = s.f.svm.get_account(&s.capacity).unwrap();
+    let offset = Slab::<state_types::ListCapacity, state_types::ListCapacityEntry>::space_for(0);
+    let entries: &mut [state_types::ListCapacityEntry] =
+        anchor_lang::bytemuck::cast_slice_mut(&mut old_capacity.data[offset..]);
+    entries[0].active = 1.into();
+    s.f.svm.set_account(s.capacity, old_capacity).unwrap();
+    let set = s.set(1, offer(1));
+    s.provider_send(set, 1).unwrap();
+    assert_eq!(
+        account::<state_types::ListTerms>(&s.f.svm, s.terms).limits_version,
+        0
+    );
+    let reserve = s.reserve(1);
+    assert!(format!("{:?}", s.send(reserve).unwrap_err().err).contains("Custom(6006)"));
+    let mut old_capacity = s.f.svm.get_account(&s.capacity).unwrap();
+    let entries: &mut [state_types::ListCapacityEntry] =
+        anchor_lang::bytemuck::cast_slice_mut(&mut old_capacity.data[offset..]);
+    entries[0].active = 0.into();
+    s.f.svm.set_account(s.capacity, old_capacity).unwrap();
+    let set = s.set(1, offer(1));
+    s.provider_send(set, 1).unwrap();
+    assert_eq!(
+        account::<state_types::ListTerms>(&s.f.svm, s.terms).limits_version,
+        1
+    );
+    s.reserve_next(1);
+    assert_eq!(s.f.booked().wallet_booking_counted, 3);
 }
 
 impl ScopedFixture {
@@ -42,6 +113,7 @@ impl ScopedFixture {
                 provider.pubkey().as_ref(),
             ])
         });
+        let page = pda(&[b"provider_limit_page", f.market.as_ref(), &[0]]);
         let system_program = solana_sdk_ids::system_program::ID;
         let activate = instruction(
             inference_router_program::ID,
@@ -52,6 +124,17 @@ impl ScopedFixture {
             ix::ActivateListRouting {},
         );
         send(&mut f.svm, &[activate], &f.payer, &[]).unwrap();
+        let init = instruction(
+            inference_router_program::ID,
+            accounts::InitializeProviderLimitPage {
+                market: f.market,
+                payer: f.payer.pubkey(),
+                page,
+                system_program,
+            },
+            ix::InitializeProviderLimitPage { limit: 8, page: 0 },
+        );
+        send(&mut f.svm, &[init], &f.payer, &[]).unwrap();
         for index in 0..2 {
             let provider = f.providers[index].pubkey();
             let profile = pda(&[b"provider", f.market.as_ref(), provider.as_ref()]);
@@ -68,9 +151,9 @@ impl ScopedFixture {
                     },
                     ix::InitializeProviderPolicy {
                         limits: args::BookingLimits {
-                            wallet_window_seconds: 60,
-                            wallet_bookings_per_window: 0,
-                            wallet_booking_capacity: 0,
+                            wallet_quota_window_seconds: 60,
+                            wallet_quota: 0,
+                            wallet_concurrency: 0,
                         },
                     },
                 ),
@@ -91,6 +174,32 @@ impl ScopedFixture {
                 ),
             ];
             send(&mut f.svm, &initialize, &f.payer, &[&f.providers[index]]).unwrap();
+            let config = instruction(
+                inference_router_program::ID,
+                accounts::InitializeProviderLimits {
+                    provider,
+                    payer: f.payer.pubkey(),
+                    profile,
+                    page,
+                    identity: pda(&[b"provider_limits", f.market.as_ref(), provider.as_ref()]),
+                    system_program,
+                },
+                ix::InitializeProviderLimits {
+                    limits: args::ProviderLimits {
+                        global: args::RequestLimits {
+                            concurrency: 20,
+                            quota: 0,
+                            quota_window_seconds: 60,
+                        },
+                        wallet: args::RequestLimits {
+                            concurrency: 0,
+                            quota: 0,
+                            quota_window_seconds: 60,
+                        },
+                    },
+                },
+            );
+            send(&mut f.svm, &[config], &f.payer, &[&f.providers[index]]).unwrap();
         }
         let initialize = [
             instruction(
@@ -138,6 +247,7 @@ impl ScopedFixture {
             routing,
             terms,
             capacity,
+            page,
             wallet,
             policies,
             budgets,
@@ -148,6 +258,15 @@ impl ScopedFixture {
             let set = scoped.set(index, offer(index as u32));
             scoped.provider_send(set, index).unwrap();
         }
+        let activate = instruction(
+            inference_router_program::ID,
+            accounts::ActivateProviderLimits {
+                market: scoped.f.market,
+                council: scoped.f.payer.pubkey(),
+            },
+            ix::ActivateProviderLimits {},
+        );
+        scoped.send(activate).unwrap();
         scoped
     }
 
@@ -201,7 +320,11 @@ impl ScopedFixture {
                 market: self.f.market,
                 model: self.f.model,
                 provider: self.f.providers[index].pubkey(),
-                budget: self.budgets[index],
+                identity: pda(&[
+                    b"provider_limits",
+                    self.f.market.as_ref(),
+                    self.f.providers[index].pubkey().as_ref(),
+                ]),
                 list: self.f.list,
                 routing: self.routing,
                 terms: self.terms,
@@ -219,7 +342,7 @@ impl ScopedFixture {
                 market: self.f.market,
                 model: self.f.model,
                 terms: self.terms,
-                capacity: self.capacity,
+                limits_page: self.page,
                 user: self.f.user,
                 owner: self.f.payer.pubkey(),
                 booking: self.f.booking,
@@ -230,7 +353,7 @@ impl ScopedFixture {
                 group: None,
             },
             ix::ReserveListBooking {
-                minimum_wallet_capacity: None,
+                minimum_wallet_concurrency: None,
                 request: self.f.request(),
                 generation: Some(generation),
             },
@@ -249,7 +372,7 @@ impl ScopedFixture {
                 base: accounts::ReleaseBooking {
                     market: self.f.market,
                     model: self.f.model,
-                    capacity: self.capacity,
+                    capacity: self.page,
                     user: self.f.user,
                     booking: self.f.booking,
                     provider: self.f.providers[provider].pubkey(),
@@ -282,9 +405,9 @@ impl ScopedFixture {
                 accounts::ConfigureProviderPolicy { policy, provider },
                 ix::CommitProviderPolicyUpdate {
                     limits: args::BookingLimits {
-                        wallet_window_seconds: seconds,
-                        wallet_bookings_per_window: rate,
-                        wallet_booking_capacity: cap,
+                        wallet_quota_window_seconds: seconds,
+                        wallet_quota: rate,
+                        wallet_concurrency: cap,
                     },
                 },
             ),
@@ -297,6 +420,34 @@ impl ScopedFixture {
             &[&self.f.providers[index]],
         )
         .unwrap();
+        let config = instruction(
+            inference_router_program::ID,
+            accounts::ConfigureProviderLimits {
+                provider,
+                identity: pda(&[
+                    b"provider_limits",
+                    self.f.market.as_ref(),
+                    provider.as_ref(),
+                ]),
+                profile: pda(&[b"provider", self.f.market.as_ref(), provider.as_ref()]),
+                page: self.page,
+            },
+            ix::ConfigureProviderLimits {
+                limits: args::ProviderLimits {
+                    global: args::RequestLimits {
+                        concurrency: 20,
+                        quota: 0,
+                        quota_window_seconds: 60,
+                    },
+                    wallet: args::RequestLimits {
+                        concurrency: cap,
+                        quota: rate,
+                        quota_window_seconds: seconds,
+                    },
+                },
+            },
+        );
+        self.provider_send(config, index).unwrap();
     }
 
     fn usage(&self, index: usize) -> state_types::ProviderUsage {
@@ -329,27 +480,27 @@ fn scoped_quota_history_fallback_and_owner_lanes() {
     let mut s = ScopedFixture::new();
     s.f.time(1_000);
     s.reserve_next(1);
-    assert_eq!(s.f.booked().wallet_booking_counted, 2);
+    assert_eq!(s.f.booked().wallet_booking_counted, 3);
     s.policy(0, 1, 1, 1);
     s.f.new_lane();
     s.reserve_next(1);
     assert_eq!(s.f.booked().provider, s.f.providers[1].pubkey());
-    assert_eq!(s.usage(0).outstanding.get(), 1);
-    assert_eq!(s.usage(1).outstanding.get(), 1);
+    assert_eq!(s.usage(0).active_bookings.get(), 1);
+    assert_eq!(s.usage(1).active_bookings.get(), 1);
     s.release_next(1, 1);
     s.policy(0, 1, 1, 2);
     s.f.time(1_060);
     s.reserve_next(2);
     assert_eq!(s.f.booked().provider, s.f.providers[0].pubkey());
-    assert_eq!(s.usage(0).window_end.get(), 1_061);
+    assert_eq!(s.usage(0).quota_window_end.get(), 1_061);
     s.release_next(0, 2);
-    assert_eq!(s.usage(0).bookings.get(), 1);
+    assert_eq!(s.usage(0).quota_used.get(), 1);
     s.reserve_next(3);
     assert_eq!(s.f.booked().provider, s.f.providers[1].pubkey());
 }
 
 #[test]
-fn scoped_removal_freezes_immediately_and_recovers_allocations() {
+fn scoped_removal_freezes_immediately_and_preserves_pending_shared_usage() {
     let mut s = ScopedFixture::new();
     s.reserve_next(1);
     let remove = s.membership(0, false);
@@ -363,10 +514,8 @@ fn scoped_removal_freezes_immediately_and_recovers_allocations() {
     let mut zero = offer(0);
     zero.capacity = 0;
     let set = s.set(0, zero);
-    assert!(s.provider_send(set, 0).is_err());
-    s.release_next(0, 1);
-    let set = s.set(0, zero);
     s.provider_send(set, 0).unwrap();
+    s.release_next(0, 1);
     assert_eq!(
         account::<state_types::ProviderModelCapacity>(&s.f.svm, s.budgets[0])
             .allocated
@@ -461,9 +610,9 @@ fn scoped_policy_update_barrier_and_foreign_mirrors() {
         accounts::ConfigureProviderPolicy { policy, provider },
         ix::CommitProviderPolicyUpdate {
             limits: args::BookingLimits {
-                wallet_window_seconds: 60,
-                wallet_bookings_per_window: 1,
-                wallet_booking_capacity: 1,
+                wallet_quota_window_seconds: 60,
+                wallet_quota: 1,
+                wallet_concurrency: 1,
             },
         },
     );
@@ -507,7 +656,7 @@ fn scoped_claim_expiry_and_invalid_account_bindings() {
             base: accounts::ClaimBooking {
                 market: s.f.market,
                 model: s.f.model,
-                capacity: s.capacity,
+                capacity: s.page,
                 user: s.f.user,
                 booking: s.f.booking,
                 provider: s.f.providers[0].pubkey(),
@@ -541,7 +690,7 @@ fn scoped_claim_expiry_and_invalid_account_bindings() {
     );
     s.provider_send(claim.clone(), 0).unwrap();
     assert!(s.provider_send(claim, 0).is_err());
-    assert_eq!(s.usage(0).outstanding.get(), 0);
+    assert_eq!(s.usage(0).active_bookings.get(), 0);
     assert_eq!(token_account(&s.f.svm, s.f.payouts[0]).amount, 100);
     s.reserve_next(2);
     let expire = instruction(
@@ -550,7 +699,7 @@ fn scoped_claim_expiry_and_invalid_account_bindings() {
             base: accounts::ExpireBooking {
                 market: s.f.market,
                 model: s.f.model,
-                capacity: s.capacity,
+                capacity: s.page,
                 user: s.f.user,
                 booking: s.f.booking,
             },
@@ -564,7 +713,7 @@ fn scoped_claim_expiry_and_invalid_account_bindings() {
     s.f.time(s.f.booked().claim_end.get() + 1);
     s.send(expire.clone()).unwrap();
     assert!(s.send(expire).is_err());
-    assert_eq!(s.usage(0).outstanding.get(), 0);
+    assert_eq!(s.usage(0).active_bookings.get(), 0);
 }
 
 impl ScopedFixture {
@@ -662,12 +811,12 @@ fn scoped_cross_list_capacity_quota_and_policy_barrier() {
     let mut bigger = offer(0);
     bigger.capacity = 11;
     let set = s.set(0, bigger);
-    assert!(s.provider_send(set, 0).is_err());
+    s.provider_send(set, 0).unwrap();
     assert_eq!(
         account::<state_types::ProviderModelCapacity>(&s.f.svm, s.budgets[0])
             .allocated
             .get(),
-        20
+        0
     );
     s.use_scope(first);
     s.reserve_next(1);
@@ -702,9 +851,9 @@ fn scoped_cross_list_capacity_quota_and_policy_barrier() {
         accounts::ConfigureProviderPolicy { policy, provider },
         ix::CommitProviderPolicyUpdate {
             limits: args::BookingLimits {
-                wallet_window_seconds: 1,
-                wallet_bookings_per_window: 1,
-                wallet_booking_capacity: 1,
+                wallet_quota_window_seconds: 1,
+                wallet_quota: 1,
+                wallet_concurrency: 1,
             },
         },
     );
@@ -719,7 +868,7 @@ fn scoped_cross_list_capacity_quota_and_policy_barrier() {
             list: s.f.list,
             terms: s.terms,
             capacity: s.capacity,
-            budget: s.budgets[0],
+            provider: s.f.providers[0].pubkey(),
         },
         ix::PruneListOffer {},
     );
@@ -729,10 +878,10 @@ fn scoped_cross_list_capacity_quota_and_policy_barrier() {
         account::<state_types::ProviderModelCapacity>(&s.f.svm, s.budgets[0])
             .allocated
             .get(),
-        10
+        0
     );
-    assert_eq!(s.usage(0).bookings.get(), 2);
-    assert_eq!(s.usage(0).window_end.get(), 1060);
+    assert_eq!(s.usage(0).quota_used.get(), 2);
+    assert_eq!(s.usage(0).quota_window_end.get(), 1060);
     assert_eq!(
         account::<state_types::User>(&s.f.svm, original_user)
             .free
@@ -760,7 +909,7 @@ fn scoped_churn_preserves_ties_pending_capacity_and_wallet_hints() {
     let set = s.set(larger, same);
     s.provider_send(set, larger).unwrap();
     s.reserve_next(1);
-    assert_eq!(s.f.booked().slot.get(), 0);
+    assert_eq!(s.f.booked().slot.get(), (larger as u32) << 5);
     let pending = s.release(larger, 1);
     let set = s.set(smaller, same);
     s.provider_send(set, smaller).unwrap();
@@ -770,8 +919,8 @@ fn scoped_churn_preserves_ties_pending_capacity_and_wallet_hints() {
     s.reserve_next(1);
     assert_eq!(s.f.booked().provider, s.f.providers[smaller].pubkey());
     s.provider_send(pending, larger).unwrap();
-    assert_eq!(s.usage(smaller).outstanding.get(), 1);
-    assert_eq!(s.usage(larger).outstanding.get(), 0);
+    assert_eq!(s.usage(smaller).active_bookings.get(), 1);
+    assert_eq!(s.usage(larger).active_bookings.get(), 0);
     s.release_next(smaller, 1);
     let enable = s.enable(larger);
     s.provider_send(enable, larger).unwrap();
@@ -783,7 +932,7 @@ fn scoped_churn_preserves_ties_pending_capacity_and_wallet_hints() {
     request.estimated_output = 0;
     let mut reserve = s.reserve(3);
     reserve.data = ix::ReserveListBooking {
-        minimum_wallet_capacity: None,
+        minimum_wallet_concurrency: None,
         request,
         generation: Some(3),
     }
@@ -795,8 +944,8 @@ fn scoped_churn_preserves_ties_pending_capacity_and_wallet_hints() {
     s.provider_send(freeze, larger).unwrap();
     s.reserve_next(4);
     assert_eq!(s.f.booked().provider, s.f.providers[smaller].pubkey());
-    assert_eq!(s.usage(smaller).outstanding.get(), 1);
-    assert_eq!(s.usage(larger).outstanding.get(), 0);
+    assert_eq!(s.usage(smaller).active_bookings.get(), 1);
+    assert_eq!(s.usage(larger).active_bookings.get(), 0);
 }
 
 #[test]
@@ -825,7 +974,7 @@ fn scoped_wallet_history_cannot_be_pruned_or_closed_early() {
         ix::PruneProviderWallet {},
     );
     s.send(prune.clone()).unwrap();
-    assert_eq!(s.usage(0).bookings.get(), 1);
+    assert_eq!(s.usage(0).quota_used.get(), 1);
     s.reserve_next(2);
     assert_eq!(s.f.booked().provider, s.f.providers[1].pubkey());
     s.release_next(1, 2);
@@ -948,24 +1097,6 @@ fn scoped_wallet_capacity_spans_models_and_rejects_foreign_settlement_books() {
     );
     s.send(books).unwrap();
     for index in 0..2 {
-        let provider = s.f.providers[index].pubkey();
-        s.budgets[index] = pda(&[b"provider_capacity", s.f.model.as_ref(), provider.as_ref()]);
-        let init = instruction(
-            inference_router_program::ID,
-            accounts::InitializeModelCapacity {
-                market: s.f.market,
-                model: s.f.model,
-                provider,
-                payer: s.f.payer.pubkey(),
-                profile: pda(&[b"provider", s.f.market.as_ref(), provider.as_ref()]),
-                legacy_terms: s.f.terms,
-                legacy_capacity: s.f.capacity,
-                budget: s.budgets[index],
-                system_program,
-            },
-            ix::InitializeModelCapacity { total: 20 },
-        );
-        s.provider_send(init, index).unwrap();
         let set = s.set(index, offer(index as u32));
         s.provider_send(set, index).unwrap();
     }
@@ -974,10 +1105,10 @@ fn scoped_wallet_capacity_spans_models_and_rejects_foreign_settlement_books() {
     let mut bad = s.release(1, 1);
     bad.accounts[2].pubkey = second_capacity;
     assert!(s.provider_send(bad, 1).is_err());
-    assert_eq!(s.usage(1).outstanding.get(), 1);
+    assert_eq!(s.usage(1).active_bookings.get(), 1);
     s.release_next(1, 1);
     s.provider_send(second_release, 0).unwrap();
-    assert_eq!(s.usage(0).outstanding.get(), 0);
+    assert_eq!(s.usage(0).active_bookings.get(), 0);
 }
 
 #[test]
@@ -1084,12 +1215,12 @@ fn scoped_identity_initialization_and_transaction_rollback_are_enforced() {
         .iter_mut()
         .find(|entry| entry.provider == s.f.providers[0].pubkey())
         .unwrap();
-    entry.bookings = u32::MAX.into();
+    entry.quota_used = u32::MAX.into();
     s.f.svm.set_account(s.wallet, wallet).unwrap();
     s.reserve_next(2);
-    assert_eq!(s.usage(0).bookings.get(), u32::MAX);
+    assert_eq!(s.usage(0).quota_used.get(), u32::MAX);
     s.release_next(0, 2);
-    assert_eq!(s.usage(0).outstanding.get(), 0);
+    assert_eq!(s.usage(0).active_bookings.get(), 0);
 }
 
 #[test]
@@ -1108,7 +1239,7 @@ fn scoped_book_closure_and_reenrollment_cannot_reset_wallet_rate_budget() {
                 list: s.f.list,
                 terms: s.terms,
                 capacity: s.capacity,
-                budget: s.budgets[index],
+                provider: s.f.providers[index].pubkey(),
             },
             ix::PruneListOffer {},
         );
@@ -1215,7 +1346,7 @@ fn scoped_book_closure_and_reenrollment_cannot_reset_wallet_rate_budget() {
     }
     s.reserve_next(2);
     assert_eq!(s.f.booked().provider, s.f.providers[1].pubkey());
-    assert_eq!(s.usage(0).bookings.get(), 1);
+    assert_eq!(s.usage(0).quota_used.get(), 1);
 }
 
 #[test]
@@ -1228,7 +1359,7 @@ fn scoped_demand_filters_configured_capacity_without_reserving_a_batch() {
         reserve.data = ix::ReserveListBooking {
             request: s.f.request(),
             generation: Some(1),
-            minimum_wallet_capacity: Some(n),
+            minimum_wallet_concurrency: Some(n),
         }
         .data();
         reserve
@@ -1244,14 +1375,13 @@ fn scoped_demand_filters_configured_capacity_without_reserving_a_batch() {
     }
     s.f.new_lane();
     assert!(s.send(demand(&s, 3)).is_err());
-    assert_eq!(s.usage(1).outstanding.get(), 3);
+    assert_eq!(s.usage(1).active_bookings.get(), 3);
     s.policy(0, 60, 0, 0);
     let mut offer = offer(0);
     offer.capacity = 2;
     let set = s.set(0, offer);
     s.provider_send(set, 0).unwrap();
-    assert!(s.send(demand(&s, 3)).is_err());
-    s.send(demand(&s, 2)).unwrap();
+    s.send(demand(&s, 3)).unwrap();
     assert_eq!(s.f.booked().provider, s.f.providers[0].pubkey());
 }
 

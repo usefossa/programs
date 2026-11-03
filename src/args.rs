@@ -218,16 +218,29 @@ mod tests {
 
 #[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
 pub struct BookingLimits {
-    pub wallet_window_seconds: u32,
-    pub wallet_bookings_per_window: u32,
-    pub wallet_booking_capacity: u32,
+    pub wallet_quota_window_seconds: u32,
+    pub wallet_quota: u32,
+    pub wallet_concurrency: u32,
 }
 
 impl BookingLimits {
     pub fn validate(&self) -> ProgramResult {
         crate::helpers::require(
-            (1..=86_400).contains(&self.wallet_window_seconds),
+            (1..=86_400).contains(&self.wallet_quota_window_seconds),
             crate::RouterError::InvalidArgument,
         )
     }
+}
+
+#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
+pub struct RequestLimits {
+    pub concurrency: u32,
+    pub quota: u32,
+    pub quota_window_seconds: u32,
+}
+
+#[derive(Clone, Copy, IdlType, AnchorDeserialize, AnchorSerialize)]
+pub struct ProviderLimits {
+    pub global: RequestLimits,
+    pub wallet: RequestLimits,
 }

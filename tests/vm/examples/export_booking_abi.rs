@@ -39,9 +39,9 @@ fn main() {
         Address::find_program_address(&[b"provider", market.as_ref(), provider.as_ref()], &ID).0;
     let authority = Address::find_program_address(&[b"vault", user.as_ref()], &ID).0;
     let limits = args::BookingLimits {
-        wallet_window_seconds: 60,
-        wallet_bookings_per_window: 5,
-        wallet_booking_capacity: 2,
+        wallet_quota_window_seconds: 60,
+        wallet_quota: 5,
+        wallet_concurrency: 2,
     };
 
     let offer = args::Offer {
@@ -230,6 +230,74 @@ fn emit_scoped(
     let (wallet, wallet_bump) = derive(&[b"provider_wallet", market.as_ref(), owner.as_ref()]);
     let (budget, budget_bump) = derive(&[b"provider_capacity", model.as_ref(), provider.as_ref()]);
     let system_program = solana_sdk_ids::system_program::ID;
+    let (page, page_bump) = derive(&[b"provider_limit_page", market.as_ref(), &[0]]);
+    let (identity, identity_bump) =
+        derive(&[b"provider_limits", market.as_ref(), provider.as_ref()]);
+    let provider_limits = args::ProviderLimits {
+        global: args::RequestLimits {
+            concurrency: 100,
+            quota: 200,
+            quota_window_seconds: 60,
+        },
+        wallet: args::RequestLimits {
+            concurrency: 10,
+            quota: 20,
+            quota_window_seconds: 60,
+        },
+    };
+    emit(
+        "activate_provider_limits",
+        accounts::ActivateProviderLimits {
+            market,
+            council: payer,
+        },
+        ix::ActivateProviderLimits {},
+    );
+    emit(
+        "initialize_provider_limit_page",
+        accounts::InitializeProviderLimitPage {
+            market,
+            payer,
+            page,
+            system_program,
+        },
+        ix::InitializeProviderLimitPage { limit: 8, page: 0 },
+    );
+    emit(
+        "grow_provider_limit_page",
+        accounts::GrowProviderLimitPage {
+            page,
+            payer,
+            system_program,
+        },
+        ix::GrowProviderLimitPage { limit: 16 },
+    );
+    emit(
+        "initialize_provider_limits",
+        accounts::InitializeProviderLimits {
+            provider,
+            payer,
+            profile,
+            page,
+            identity,
+            system_program,
+        },
+        ix::InitializeProviderLimits {
+            limits: provider_limits,
+        },
+    );
+    emit(
+        "configure_provider_limits",
+        accounts::ConfigureProviderLimits {
+            provider,
+            identity,
+            profile,
+            page,
+        },
+        ix::ConfigureProviderLimits {
+            limits: provider_limits,
+        },
+    );
     emit(
         "activate_list_routing",
         accounts::ActivateListRouting {
@@ -337,7 +405,11 @@ fn emit_scoped(
             market,
             model,
             provider,
-            budget,
+            identity: Address::find_program_address(
+                &[b"provider_limits", market.as_ref(), provider.as_ref()],
+                &inference_router_program::ID,
+            )
+            .0,
             list,
             routing,
             terms,
@@ -352,7 +424,7 @@ fn emit_scoped(
             list,
             terms,
             capacity,
-            budget,
+            provider,
         },
         ix::PruneListOffer {},
     );
@@ -463,7 +535,7 @@ fn emit_scoped(
             market,
             model,
             terms,
-            capacity,
+            limits_page: page,
             user,
             owner,
             booking,
@@ -474,7 +546,7 @@ fn emit_scoped(
             group: None,
         },
         ix::ReserveListBooking {
-            minimum_wallet_capacity: None,
+            minimum_wallet_concurrency: None,
             request,
             generation: Some(generation),
         },
@@ -485,7 +557,7 @@ fn emit_scoped(
             base: accounts::ClaimBooking {
                 market,
                 model,
-                capacity,
+                capacity: page,
                 user,
                 booking,
                 provider,
@@ -512,7 +584,7 @@ fn emit_scoped(
             base: accounts::ReleaseBooking {
                 market,
                 model,
-                capacity,
+                capacity: page,
                 user,
                 booking,
                 provider,
@@ -529,7 +601,7 @@ fn emit_scoped(
             base: accounts::ExpireBooking {
                 market,
                 model,
-                capacity,
+                capacity: page,
                 user,
                 booking,
             },
@@ -542,9 +614,9 @@ fn emit_scoped(
     let mut policy_state = state_types::ProviderPolicy::zeroed();
     policy_state.market = market;
     policy_state.provider = provider;
-    policy_state.wallet_window_seconds = limits.wallet_window_seconds.into();
-    policy_state.wallet_bookings_per_window = limits.wallet_bookings_per_window.into();
-    policy_state.wallet_booking_capacity = limits.wallet_booking_capacity.into();
+    policy_state.wallet_quota_window_seconds = limits.wallet_quota_window_seconds.into();
+    policy_state.wallet_quota = limits.wallet_quota.into();
+    policy_state.wallet_concurrency = limits.wallet_concurrency.into();
     policy_state.epoch = 1.into();
     policy_state.active_mirrors = 1.into();
     policy_state.bump = policy_bump;
@@ -579,9 +651,9 @@ fn emit_scoped(
     routing_state.bump = routing_bump;
     let mirror = state_types::PolicyMirror {
         provider,
-        wallet_window_seconds: limits.wallet_window_seconds.into(),
-        wallet_bookings_per_window: limits.wallet_bookings_per_window.into(),
-        wallet_booking_capacity: limits.wallet_booking_capacity.into(),
+        wallet_quota_window_seconds: limits.wallet_quota_window_seconds.into(),
+        wallet_quota: limits.wallet_quota.into(),
+        wallet_concurrency: limits.wallet_concurrency.into(),
         epoch: 1.into(),
         active: 1,
         reserved: [0; 3],
@@ -593,6 +665,7 @@ fn emit_scoped(
     terms_state.limit = 1.into();
     terms_state.next_order = 1.into();
     terms_state.bump = terms_bump;
+    terms_state.limits_version = 1;
     let entry = state_types::ListOffer {
         terms: state_types::TermsEntry {
             provider,
@@ -606,7 +679,7 @@ fn emit_scoped(
             active: 1,
             input_modalities: offer.input_modalities,
             output_modalities: offer.output_modalities,
-            version: state_types::OFFER_VERSION,
+            version: state_types::LIST_OFFER_VERSION,
             reserved: 0,
             capacity: 10.into(),
             context_window: offer.context_window.into(),
@@ -633,15 +706,44 @@ fn emit_scoped(
     wallet_state.bump = wallet_bump;
     let usage = state_types::ProviderUsage {
         provider,
-        window_end: 1_793_420_000i64.into(),
-        bookings: 2.into(),
-        outstanding: 1.into(),
+        quota_window_end: 1_793_420_000i64.into(),
+        quota_used: 2.into(),
+        active_bookings: 1.into(),
     };
     macro_rules! slab { ($name:literal, $key:expr, $header:expr, $entry:expr, $h:ty, $t:ty) => {{
         let offset=Slab::<$h,$t>::space_for(0); let mut data=vec![0;Slab::<$h,$t>::space_for(1)]; let disc=<$h>::DISCRIMINATOR;
         data[..8].copy_from_slice(disc); let header=bytes_of(&$header); data[8..8+header.len()].copy_from_slice(header); data[8+header.len()..12+header.len()].copy_from_slice(&1u32.to_le_bytes()); data[offset..].copy_from_slice(cast_slice(&[$entry]));
         println!("{{\"layout\":\"{}\",\"address\":\"{}\",\"discriminator\":{disc:?},\"entry_offset\":{offset},\"entry_bytes\":{},\"data\":{data:?}}}",$name,$key,core::mem::size_of::<$t>());
     }}}
+    let mut page_state = state_types::ProviderLimitPage::zeroed();
+    page_state.market = market;
+    page_state.bump = page_bump;
+    let row = state_types::ProviderLimitEntry {
+        concurrency_limit: 100.into(),
+        quota_limit: 200.into(),
+        quota_window_seconds: 60.into(),
+        quota_window_end: 1_793_420_000i64.into(),
+        quota_used: 7.into(),
+        active_bookings: 2.into(),
+        wallet_concurrency_limit: 10.into(),
+        wallet_quota_limit: 20.into(),
+        wallet_quota_window_seconds: 60.into(),
+    };
+    slab!(
+        "ProviderLimitPage",
+        page,
+        page_state,
+        row,
+        state_types::ProviderLimitPage,
+        state_types::ProviderLimitEntry
+    );
+    let mut identity_state = state_types::ProviderLimitIndex::zeroed();
+    identity_state.market = market;
+    identity_state.provider = provider;
+    identity_state.bump = identity_bump;
+    let disc = state_types::ProviderLimitIndex::DISCRIMINATOR;
+    let data = [disc, bytes_of(&identity_state)].concat();
+    println!("{{\"layout\":\"ProviderLimitIndex\",\"address\":\"{identity}\",\"discriminator\":{disc:?},\"bytes\":{},\"data\":{data:?}}}", data.len());
     slab!(
         "ListRouting",
         routing,

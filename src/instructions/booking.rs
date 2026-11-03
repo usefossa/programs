@@ -211,7 +211,7 @@ fn claim_core(
     require(
         accounts.booking.status == 0
             && accounts.booking.reserved == [0; 4]
-            && accounts.booking.wallet_booking_counted <= 2
+            && accounts.booking.wallet_booking_counted <= 3
             && accounts.booking.reserved5 == 0
             && Clock::get()?.unix_timestamp <= accounts.booking.claim_end.get(),
         crate::RouterError::InvalidState,

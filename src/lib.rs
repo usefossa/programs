@@ -37,6 +37,10 @@ pub enum RouterError {
     LimitExceeded,
     #[msg("wallet booking storage full")]
     WalletBookingsFull,
+    #[msg("provider limit page required")]
+    ProviderLimitPageRequired,
+    #[msg("selected provider limit page must be writable")]
+    ProviderLimitPageReadonly,
 }
 
 #[cfg(feature = "local-test")]
@@ -47,6 +51,34 @@ pub const CLAIM_SECONDS: i64 = 300;
 #[program]
 pub mod fossa_router {
     use super::*;
+    pub fn activate_provider_limits(ctx: &mut Context<ActivateProviderLimits>) -> Result<()> {
+        instructions::scoped::activate_provider_limits(ctx)
+    }
+    pub fn initialize_provider_limit_page(
+        ctx: &mut Context<InitializeProviderLimitPage>,
+        limit: u32,
+        page: u8,
+    ) -> Result<()> {
+        instructions::scoped::initialize_provider_limit_page(ctx, limit, page)
+    }
+    pub fn grow_provider_limit_page(
+        ctx: &mut Context<GrowProviderLimitPage>,
+        limit: u32,
+    ) -> Result<()> {
+        instructions::scoped::grow_provider_limit_page(ctx, limit)
+    }
+    pub fn initialize_provider_limits(
+        ctx: &mut Context<InitializeProviderLimits>,
+        limits: ProviderLimits,
+    ) -> Result<()> {
+        instructions::scoped::initialize_provider_limits(ctx, &limits)
+    }
+    pub fn configure_provider_limits(
+        ctx: &mut Context<ConfigureProviderLimits>,
+        limits: ProviderLimits,
+    ) -> Result<()> {
+        instructions::scoped::configure_provider_limits(ctx, &limits)
+    }
     pub fn activate_list_routing(ctx: &mut Context<ActivateListRouting>) -> Result<()> {
         instructions::scoped::activate(ctx)
     }
@@ -139,9 +171,9 @@ pub mod fossa_router {
         ctx: &mut Context<ReserveListBooking>,
         request: ReserveRequest,
         generation: Option<u64>,
-        minimum_wallet_capacity: Option<u32>,
+        minimum_wallet_concurrency: Option<u32>,
     ) -> Result<()> {
-        instructions::scoped::reserve(ctx, &request, generation, minimum_wallet_capacity)
+        instructions::scoped::reserve(ctx, &request, generation, minimum_wallet_concurrency)
     }
     pub fn initialize_market(ctx: &mut Context<InitializeMarket>) -> Result<()> {
         instructions::market::initialize(ctx)

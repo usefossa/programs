@@ -9,6 +9,13 @@ pub struct ActivateListRouting {
 }
 
 #[derive(Accounts)]
+pub struct ActivateProviderLimits {
+    #[account(mut, constraint = market.council == *council.address() @ crate::RouterError::Unauthorized)]
+    pub market: Account<Market>,
+    pub council: Signer,
+}
+
+#[derive(Accounts)]
 pub struct InitializeProviderPolicy {
     pub market: Account<Market>,
     pub provider: Signer,
@@ -191,8 +198,8 @@ pub struct SetListOffer {
     #[account(constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount)]
     pub model: Account<Model>,
     pub provider: Signer,
-    #[account(mut, constraint = budget.model == *model.address() && budget.provider == *provider.address() @ crate::RouterError::Unauthorized)]
-    pub budget: Account<ProviderModelCapacity>,
+    #[account(constraint = identity.provider == *provider.address() && identity.market == *market.address() @ crate::RouterError::Unauthorized)]
+    pub identity: Account<ProviderLimitIndex>,
     #[account(constraint = list.market == *market.address() @ crate::RouterError::InvalidAccount)]
     pub list: Slab<List, Address>,
     #[account(constraint = routing.list == *list.address() && routing.market == *market.address() @ crate::RouterError::InvalidAccount)]
@@ -212,8 +219,7 @@ pub struct PruneListOffer {
     pub terms: Slab<ListTerms, ListOffer>,
     #[account(mut, address = terms.capacity @ crate::RouterError::InvalidAccount, constraint = capacity.terms == *terms.address() @ crate::RouterError::InvalidAccount)]
     pub capacity: Slab<ListCapacity, ListCapacityEntry>,
-    #[account(mut, constraint = budget.model == terms.model @ crate::RouterError::InvalidAccount)]
-    pub budget: Account<ProviderModelCapacity>,
+    pub provider: UncheckedAccount,
 }
 
 #[derive(Accounts)]
@@ -256,14 +262,14 @@ pub struct CloseProviderWallet {
 
 #[derive(Accounts)]
 pub struct ReserveListBooking {
-    #[account(constraint = market.reserved[0] == 1 @ crate::RouterError::InvalidState)]
+    #[account(constraint = market.reserved[0] == 2 @ crate::RouterError::InvalidState)]
     pub market: Account<Market>,
     #[account(constraint = model.market == *market.address() @ crate::RouterError::InvalidAccount)]
     pub model: Account<Model>,
-    #[account(constraint = terms.model == *model.address() && terms.list == *list.address() @ crate::RouterError::InvalidAccount)]
+    #[account(constraint = terms.model == *model.address() && terms.list == *list.address() @ crate::RouterError::InvalidAccount, constraint = terms.limits_version == 1 @ crate::RouterError::InvalidState)]
     pub terms: Slab<ListTerms, ListOffer>,
-    #[account(mut, address = terms.capacity @ crate::RouterError::InvalidAccount, constraint = capacity.terms == *terms.address() && capacity.len() == terms.len() @ crate::RouterError::InvalidAccount)]
-    pub capacity: Slab<ListCapacity, ListCapacityEntry>,
+    #[account(mut, constraint = limits_page.market == *market.address() @ crate::RouterError::InvalidAccount)]
+    pub limits_page: Slab<ProviderLimitPage, ProviderLimitEntry>,
     #[account(mut, constraint = user.market == *market.address() && user.owner == *owner.address() @ crate::RouterError::Unauthorized)]
     pub user: Account<User>,
     pub owner: Signer,
@@ -278,4 +284,49 @@ pub struct ReserveListBooking {
     pub wallet: Slab<ProviderWallet, ProviderUsage>,
     #[account(address = model.group @ crate::RouterError::InvalidAccount, constraint = group.market == *market.address() @ crate::RouterError::InvalidAccount)]
     pub group: Option<Account<ModelGroup>>,
+}
+
+#[derive(Accounts)]
+#[instruction(_limit: u32, _page: u8)]
+pub struct InitializeProviderLimitPage {
+    pub market: Account<Market>,
+    #[account(mut)]
+    pub payer: Signer,
+    #[account(init, payer = payer, seeds = [b"provider_limit_page", market.address().as_ref(), &[_page]], bump, space = Slab::<ProviderLimitPage, ProviderLimitEntry>::space_for(_limit))]
+    pub page: Slab<ProviderLimitPage, ProviderLimitEntry>,
+    pub system_program: Program<System>,
+}
+
+#[derive(Accounts)]
+pub struct GrowProviderLimitPage {
+    #[account(mut)]
+    pub page: Slab<ProviderLimitPage, ProviderLimitEntry>,
+    #[account(mut)]
+    pub payer: Signer,
+    pub system_program: Program<System>,
+}
+
+#[derive(Accounts)]
+pub struct ConfigureProviderLimits {
+    pub provider: Signer,
+    #[account(constraint = identity.provider == *provider.address() && identity.market == page.market && identity.index.get() & 31 == u32::from(page.page) @ crate::RouterError::Unauthorized)]
+    pub identity: Account<ProviderLimitIndex>,
+    #[account(constraint = profile.market == page.market && profile.authority == *provider.address() @ crate::RouterError::Unauthorized)]
+    pub profile: Account<Provider>,
+    #[account(mut)]
+    pub page: Slab<ProviderLimitPage, ProviderLimitEntry>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeProviderLimits {
+    pub provider: Signer,
+    #[account(mut, unsafe(dup))]
+    pub payer: Signer,
+    #[account(constraint = profile.market == page.market && profile.authority == *provider.address() @ crate::RouterError::Unauthorized)]
+    pub profile: Account<Provider>,
+    #[account(mut)]
+    pub page: Slab<ProviderLimitPage, ProviderLimitEntry>,
+    #[account(init, payer = payer, seeds = [b"provider_limits", page.market.as_ref(), provider.address().as_ref()], bump)]
+    pub identity: Account<ProviderLimitIndex>,
+    pub system_program: Program<System>,
 }

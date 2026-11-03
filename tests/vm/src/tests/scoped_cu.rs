@@ -67,9 +67,9 @@ pub(super) fn convert(
         .iter()
         .map(|offer| state_types::PolicyMirror {
             provider: offer.terms.provider,
-            wallet_window_seconds: 60.into(),
-            wallet_bookings_per_window: (if enabled { 10 } else { 0 }).into(),
-            wallet_booking_capacity: (if enabled { 10 } else { 0 }).into(),
+            wallet_quota_window_seconds: 60.into(),
+            wallet_quota: (if enabled { 10 } else { 0 }).into(),
+            wallet_concurrency: (if enabled { 10 } else { 0 }).into(),
             epoch: 1.into(),
             active: 1,
             reserved: [0; 3],
@@ -86,9 +86,9 @@ pub(super) fn convert(
         .filter(|_| populated)
         .map(|offer| state_types::ProviderUsage {
             provider: offer.terms.provider,
-            window_end: i64::MAX.into(),
-            bookings: 1.into(),
-            outstanding: 0.into(),
+            quota_window_end: i64::MAX.into(),
+            quota_used: 1.into(),
+            active_bookings: 0.into(),
         })
         .collect();
     for index in 0..unrelated {
@@ -96,9 +96,9 @@ pub(super) fn convert(
         key[31] = 34;
         usage.push(state_types::ProviderUsage {
             provider: Address::new_from_array(key),
-            window_end: i64::MAX.into(),
-            bookings: 1.into(),
-            outstanding: 0.into(),
+            quota_window_end: i64::MAX.into(),
+            quota_used: 1.into(),
+            active_bookings: 0.into(),
         });
     }
     usage.sort_by_key(|entry| entry.provider);
@@ -117,7 +117,7 @@ pub(super) fn convert(
             market,
             model,
             terms,
-            capacity,
+            limits_page: capacity,
             user: reserve.accounts[4].pubkey,
             owner: payer.pubkey(),
             booking: reserve.accounts[6].pubkey,
@@ -128,7 +128,7 @@ pub(super) fn convert(
             group: None,
         },
         ix::ReserveListBooking {
-            minimum_wallet_capacity: None,
+            minimum_wallet_concurrency: None,
             request,
             generation: None,
         },
@@ -179,7 +179,7 @@ fn scoped_routing_cu_benchmark() {
                 let mut last_provider = None;
                 if scenario.starts_with("all_exhausted") || scenario.starts_with("last_eligible") {
                     for entry in entries.iter_mut() {
-                        entry.bookings = 10.into();
+                        entry.quota_used = 10.into();
                     }
                     if scenario.starts_with("last_eligible") {
                         let last = entries
@@ -187,7 +187,7 @@ fn scoped_routing_cu_benchmark() {
                             .rev()
                             .find(|entry| entry.provider.as_ref()[31] == 33)
                             .unwrap();
-                        last.bookings = 1.into();
+                        last.quota_used = 1.into();
                         last_provider = Some(last.provider);
                     }
                 }
@@ -336,9 +336,9 @@ fn scoped_ordered_and_history_cu_benchmark() {
             key[28..].copy_from_slice(&(index as u32).to_be_bytes());
             entries.push(state_types::ProviderUsage {
                 provider: Address::new_from_array(key),
-                window_end: i64::MAX.into(),
-                bookings: 1.into(),
-                outstanding: 0.into(),
+                quota_window_end: i64::MAX.into(),
+                quota_used: 1.into(),
+                active_bookings: 0.into(),
             });
         }
         entries.sort_by_key(|entry| entry.provider);

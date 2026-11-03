@@ -1,6 +1,6 @@
 use super::*;
 
-fn legacy_terms(svm: &mut LiteSVM, address: Address) {
+pub(super) fn legacy_terms(svm: &mut LiteSVM, address: Address) {
     let mut account = svm.get_account(&address).unwrap();
     assert_eq!(&account.data[..8], state_types::Terms::DISCRIMINATOR);
     let mut data = account.data[..48].to_vec();
@@ -55,7 +55,7 @@ fn measure_instruction(
     results.into_iter().next().unwrap()
 }
 
-fn post<T: AccountDeserialize>(
+pub(super) fn post<T: AccountDeserialize>(
     result: &litesvm::types::SimulatedTransactionInfo,
     key: Address,
 ) -> T {
@@ -147,7 +147,8 @@ fn booking_lifecycle_cu_benchmark() {
             } else if !scoped {
                 svm.add_program_from_file(
                     inference_router_program::ID,
-                    "/tmp/fossa-wallet-limits-quota-baseline.so",
+                    std::env::var_os("FOSSA_PRE_QUOTA_SBF")
+                        .expect("FOSSA_PRE_QUOTA_SBF must name the historical fixture program"),
                 )
                 .unwrap();
             }
@@ -162,17 +163,17 @@ fn booking_lifecycle_cu_benchmark() {
                 for entry in anchor_lang::bytemuck::cast_slice_mut::<_, state_types::BookingPolicy>(
                     &mut stored.data[52..],
                 ) {
-                    entry.wallet_bookings_per_window = 10.into();
-                    entry.wallet_booking_capacity = 10.into();
+                    entry.wallet_quota = 10.into();
+                    entry.wallet_concurrency = 10.into();
                 }
                 svm.set_account(policies, stored).unwrap();
                 let header: state_types::WalletBookings = account(&svm, wallet);
                 let entries: Vec<_> = (0..32)
                     .map(|index| state_types::WalletBookingEntry {
                         provider_policy: index.into(),
-                        window_end: i64::MAX.into(),
-                        bookings: 1.into(),
-                        outstanding: 0.into(),
+                        quota_window_end: i64::MAX.into(),
+                        quota_used: 1.into(),
+                        active_bookings: 0.into(),
                     })
                     .collect();
                 store_slab(&mut svm, wallet, &header, &entries, 32);
@@ -205,7 +206,7 @@ fn booking_lifecycle_cu_benchmark() {
                 anchor_lang::wincode::deserialize(&reserve.data[8..]).unwrap();
             reserve.data = if scoped {
                 ix::ReserveListBooking {
-                    minimum_wallet_capacity: None,
+                    minimum_wallet_concurrency: None,
                     request,
                     generation: Some(1),
                 }
@@ -352,7 +353,7 @@ fn booking_lifecycle_cu_benchmark() {
                         .iter()
                         .find(|entry| entry.provider == provider)
                         .unwrap()
-                        .outstanding
+                        .active_bookings
                         .get(),
                     0
                 );
@@ -366,14 +367,14 @@ fn booking_lifecycle_cu_benchmark() {
                         .iter()
                         .find(|entry| entry.provider_policy.get() == slot as u32)
                         .unwrap()
-                        .outstanding
+                        .active_bookings
                         .get(),
                     0
                 );
             }
             reserve.data = if scoped {
                 ix::ReserveListBooking {
-                    minimum_wallet_capacity: None,
+                    minimum_wallet_concurrency: None,
                     request,
                     generation: Some(2),
                 }
@@ -471,7 +472,8 @@ fn measure_provider_instructions(
         if !legacy {
             svm.add_program_from_file(
                 inference_router_program::ID,
-                "/tmp/fossa-wallet-limits-quota-baseline.so",
+                std::env::var_os("FOSSA_PRE_QUOTA_SBF")
+                    .expect("FOSSA_PRE_QUOTA_SBF must name the historical fixture program"),
             )
             .unwrap();
         }
@@ -587,9 +589,9 @@ fn measure_scoped_provider(
         anchor_lang::bytemuck::cast_slice(&data.data[84..]).to_vec();
     entries.push(state_types::PolicyMirror {
         provider,
-        wallet_window_seconds: 60.into(),
-        wallet_bookings_per_window: 10.into(),
-        wallet_booking_capacity: 10.into(),
+        wallet_quota_window_seconds: 60.into(),
+        wallet_quota: 10.into(),
+        wallet_concurrency: 10.into(),
         epoch: 1.into(),
         active: 1,
         reserved: [0; 3],
@@ -613,7 +615,11 @@ fn measure_scoped_provider(
             market,
             model,
             provider,
-            budget,
+            identity: Address::find_program_address(
+                &[b"provider_limits", market.as_ref(), provider.as_ref()],
+                &inference_router_program::ID,
+            )
+            .0,
             list,
             routing,
             terms,

@@ -9,6 +9,7 @@ pub const MODALITY_AUDIO: u8 = 4;
 pub const MODALITY_VIDEO: u8 = 8;
 pub const MODALITIES: u8 = MODALITY_TEXT | MODALITY_IMAGE | MODALITY_AUDIO | MODALITY_VIDEO;
 pub const OFFER_VERSION: u8 = 1;
+pub const LIST_OFFER_VERSION: u8 = 2;
 
 #[account]
 pub struct Market {
@@ -226,9 +227,9 @@ pub struct BookingPolicies {
 #[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
 pub struct BookingPolicy {
     pub provider: Address,
-    pub wallet_window_seconds: PodU32,
-    pub wallet_bookings_per_window: PodU32,
-    pub wallet_booking_capacity: PodU32,
+    pub wallet_quota_window_seconds: PodU32,
+    pub wallet_quota: PodU32,
+    pub wallet_concurrency: PodU32,
 }
 
 #[account]
@@ -244,18 +245,18 @@ pub struct WalletBookings {
 #[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
 pub struct WalletBookingEntry {
     pub provider_policy: PodU32,
-    pub window_end: PodI64,
-    pub bookings: PodU32,
-    pub outstanding: PodU32,
+    pub quota_window_end: PodI64,
+    pub quota_used: PodU32,
+    pub active_bookings: PodU32,
 }
 
 #[account]
 pub struct ProviderPolicy {
     pub market: Address,
     pub provider: Address,
-    pub wallet_window_seconds: PodU32,
-    pub wallet_bookings_per_window: PodU32,
-    pub wallet_booking_capacity: PodU32,
+    pub wallet_quota_window_seconds: PodU32,
+    pub wallet_quota: PodU32,
+    pub wallet_concurrency: PodU32,
     pub epoch: PodU64,
     pub active_mirrors: PodU32,
     pub updating: u8,
@@ -276,9 +277,9 @@ pub struct ListRouting {
 #[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
 pub struct PolicyMirror {
     pub provider: Address,
-    pub wallet_window_seconds: PodU32,
-    pub wallet_bookings_per_window: PodU32,
-    pub wallet_booking_capacity: PodU32,
+    pub wallet_quota_window_seconds: PodU32,
+    pub wallet_quota: PodU32,
+    pub wallet_concurrency: PodU32,
     pub epoch: PodU64,
     pub active: u8,
     pub reserved: [u8; 3],
@@ -304,7 +305,8 @@ pub struct ListTerms {
     pub limit: PodU32,
     pub next_order: PodU32,
     pub bump: u8,
-    pub reserved: [u8; 3],
+    pub limits_version: u8,
+    pub reserved: [u8; 2],
 }
 
 #[repr(C)]
@@ -344,9 +346,9 @@ pub struct ProviderWallet {
 #[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
 pub struct ProviderUsage {
     pub provider: Address,
-    pub window_end: PodI64,
-    pub bookings: PodU32,
-    pub outstanding: PodU32,
+    pub quota_window_end: PodI64,
+    pub quota_used: PodU32,
+    pub active_bookings: PodU32,
 }
 
 // deployed offer layout remains readable while old reservations drain.
@@ -376,4 +378,35 @@ pub struct LegacyTermsEntry {
     pub context_window: PodU32,
     pub max_input: PodU32,
     pub max_output: PodU32,
+}
+
+#[account]
+pub struct ProviderLimitPage {
+    pub market: Address,
+    pub bump: u8,
+    pub page: u8,
+    pub reserved: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, anchor_lang::bytemuck::Pod, anchor_lang::bytemuck::Zeroable)]
+pub struct ProviderLimitEntry {
+    pub concurrency_limit: PodU32,
+    pub quota_limit: PodU32,
+    pub quota_window_seconds: PodU32,
+    pub quota_window_end: PodI64,
+    pub quota_used: PodU32,
+    pub active_bookings: PodU32,
+    pub wallet_concurrency_limit: PodU32,
+    pub wallet_quota_limit: PodU32,
+    pub wallet_quota_window_seconds: PodU32,
+}
+
+#[account]
+pub struct ProviderLimitIndex {
+    pub market: Address,
+    pub provider: Address,
+    pub index: PodU32,
+    pub bump: u8,
+    pub reserved: [u8; 3],
 }

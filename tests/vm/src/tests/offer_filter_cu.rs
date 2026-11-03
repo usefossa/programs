@@ -11,6 +11,8 @@ use solana_account::ReadableAccount;
 mod lifecycle;
 #[path = "scoped_cu.rs"]
 mod scoped_bench;
+#[path = "shared_limits.rs"]
+mod shared_limits;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {
@@ -184,9 +186,9 @@ fn fixture(
         .iter()
         .map(|offer| state_types::BookingPolicy {
             provider: offer.provider,
-            wallet_window_seconds: 60.into(),
-            wallet_bookings_per_window: 0.into(),
-            wallet_booking_capacity: 0.into(),
+            wallet_quota_window_seconds: 60.into(),
+            wallet_quota: 0.into(),
+            wallet_concurrency: 0.into(),
         })
         .collect();
     store_slab(svm, policies, &policy_header, &policy_entries, count as u32);
@@ -551,8 +553,8 @@ fn wallet_booking_cu_benchmark() {
                 let policy_entries: &mut [state_types::BookingPolicy] =
                     anchor_lang::bytemuck::cast_slice_mut(&mut policy_account.data[52..]);
                 for entry in policy_entries {
-                    entry.wallet_bookings_per_window = 10.into();
-                    entry.wallet_booking_capacity = 10.into();
+                    entry.wallet_quota = 10.into();
+                    entry.wallet_concurrency = 10.into();
                 }
                 let offset = if scenario.ends_with("sparse") {
                     count
@@ -625,9 +627,9 @@ fn wallet_booking_cu_benchmark() {
                             || scenario == "skip_cheapest" && index == cheapest;
                         state_types::WalletBookingEntry {
                             provider_policy: ((index + offset) as u32).into(),
-                            window_end: i64::MAX.into(),
-                            bookings: (if exhausted { 10 } else { 1 }).into(),
-                            outstanding: 0.into(),
+                            quota_window_end: i64::MAX.into(),
+                            quota_used: (if exhausted { 10 } else { 1 }).into(),
+                            active_bookings: 0.into(),
                         }
                     })
                     .collect();

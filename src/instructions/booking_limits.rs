@@ -34,6 +34,6 @@ pub(crate) fn settle(
     let wallet = wallet.ok_or(RouterError::InvalidAccount)?;
     let slot =
         lookup(wallet, booking.provider_policy.get()).map_err(|_| RouterError::InvalidAccount)?;
-    wallet[slot].outstanding = dec(wallet[slot].outstanding.get())?.into();
+    wallet[slot].active_bookings = dec(wallet[slot].active_bookings.get())?.into();
     Ok(())
 }
