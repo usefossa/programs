@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "inference-router-program"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anchor-lang",
  "anchor-spl",

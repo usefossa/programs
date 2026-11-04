@@ -43,7 +43,7 @@ fn program_path(name: &str) -> std::path::PathBuf {
     if name == "fossa_dex.so" {
         root.join("dex/target/deploy").join(name)
     } else {
-        root.join("target/deploy").join(name)
+        root.join("router/target/deploy").join(name)
     }
 }
 

@@ -90,7 +90,7 @@ async function runCli(args: string[], rpcUrl: string) {
 export async function upgrade(
   config: Config, execute = false,
   rpc = new Connection(config.solana.rpc_url, "confirmed"),
-  path = process.env.FOSSA_SBF ? resolve(process.env.FOSSA_SBF) : resolve(import.meta.dir, "../target/deploy/inference_router_program.so"),
+  path = process.env.FOSSA_SBF ? resolve(process.env.FOSSA_SBF) : resolve(import.meta.dir, "../router/target/deploy/inference_router_program.so"),
   run = runCli,
 ) {
   const artifact = readFileSync(path), hash = createHash("sha256").update(artifact).digest("hex");

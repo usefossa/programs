@@ -1,6 +1,6 @@
 # programs
 
-on-chain anchor v2 programs: `src/lib.rs` and `dex/src/lib.rs`; typed account state: `src/state_types.rs` and `dex/src/state_types.rs`; active receipt implementation: `src/receipt.rs`. `ops/` contains program upgrade tooling.
+on-chain anchor v2 programs: `router/src/lib.rs` and `dex/src/lib.rs`; typed account state: `router/src/state_types.rs` and `dex/src/state_types.rs`; active receipt implementation: `router/src/receipt.rs`. `ops/` contains program upgrade tooling.
 
 ## workflow
 
@@ -44,7 +44,7 @@ on-chain anchor v2 programs: `src/lib.rs` and `dex/src/lib.rs`; typed account st
 ## verification and releases
 
 - requested commit/push requires relevant checks and one final diff review. install ops dependencies with `cd ops && bun install --frozen-lockfile`; root `bun run test` runs offline program/ops unit tests. ops typecheck: `cd ops && bun run check`.
-- direct rust checks: `cargo test --locked`; build the on-chain artifacts with `cargo build-sbf -- --locked` and `cargo build-sbf --manifest-path dex/Cargo.toml -- --locked`.
+- direct rust checks: `cargo test --manifest-path router/Cargo.toml --locked`; build the on-chain artifacts with `cargo build-sbf --manifest-path router/Cargo.toml -- --locked` and `cargo build-sbf --manifest-path dex/Cargo.toml -- --locked`.
 - on-chain behavior changes use `bun run test:vm`, which builds both sbf artifacts and runs the shared litesvm suite in `tests/vm/`. use generated anchor clients, synthetic keys and spl fixture helpers, following `tests/vm/src/tests.rs`.
 - the vm harness requires host rust 1.97.1 or newer; select a compatible installed toolchain without changing the sbf platform tools.
 - keep pure arithmetic/matching tests beside their implementation and transaction tests in the shared vm suite. add focused success and rejection cases for changed behavior, asserting relevant balances and state. extend existing fixtures; avoid duplicate harnesses and unrelated test matrices. keep regression coverage when restructuring code.
