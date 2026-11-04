@@ -31,11 +31,29 @@ fn send(
     svm.expire_blockhash();
     let mut all_signers = vec![payer];
     all_signers.extend_from_slice(signers);
-    svm.send_transaction(Transaction::new(
+    let result = svm.send_transaction(Transaction::new(
         &all_signers,
         Message::new(instructions, Some(&payer.pubkey())),
         svm.latest_blockhash(),
-    ))
+    ));
+    if std::env::var_os("FOSSA_CU_REPORT").is_some() {
+        if let Ok(meta) = &result {
+            for ix in instructions {
+                eprintln!(
+                    "INSTRUCTION_CU program={} data={} instructions={} cu={}",
+                    ix.program_id,
+                    ix.data
+                        .iter()
+                        .take(8)
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    instructions.len(),
+                    meta.compute_units_consumed
+                );
+            }
+        }
+    }
+    result
 }
 
 fn program_path(name: &str) -> std::path::PathBuf {
@@ -579,3 +597,4 @@ fn store_account<
 mod dex;
 mod offer_filter_cu;
 mod router;
+mod token_compute;

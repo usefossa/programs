@@ -159,6 +159,21 @@ fn sample(
             }
         };
         assert!(cu <= 1_400_000);
+        if changed && error.is_none() && ix.data.starts_with(ix::ReserveListBooking::DISCRIMINATOR)
+        {
+            let offers =
+                rows::<state_types::ListTerms, state_types::ListOffer>(svm, ix.accounts[2].pubkey)
+                    .len();
+            let wallet = rows::<state_types::ProviderWallet, state_types::ProviderUsage>(
+                svm,
+                ix.accounts[10].pubkey,
+            )
+            .len();
+            let pages = ix.accounts.len().saturating_sub(11);
+            let profile =
+                6_000 + 240 * offers as u64 + 350 * pages as u64 + (wallet as u64).div_ceil(4);
+            assert!(cu <= profile, "{scenario}: {cu} exceeds profile {profile}");
+        }
         assert!(reference.is_none_or(|prior| prior == cu));
         reference = Some(cu);
     }

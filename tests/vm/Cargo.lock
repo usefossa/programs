@@ -1236,6 +1236,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-signer",
  "solana-transaction",
+ "spl-associated-token-account-interface",
 ]
 
 [[package]]
