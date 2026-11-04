@@ -5,6 +5,6 @@ rpc_url = "https://rpc.example.com"
 [marketplace]
 program_id = "REPLACE_WITH_PROGRAM_PUBLIC_KEY"
 [operator]
-keypair = "../.local/upgrade-authority.json"
-buffer = "../.local/upgrade-buffer.json"
-# payer = "../.local/payer-keypair.json"
+keypair = "/path/to/upgrade-authority.json"
+buffer = "/path/to/upgrade-buffer.json"
+# payer = "/path/to/payer-keypair.json"

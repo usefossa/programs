@@ -351,7 +351,7 @@ pub struct ProviderUsage {
     pub active_bookings: PodU32,
 }
 
-// deployed offer layout remains readable while old reservations drain.
+// prior offer layout remains readable while old reservations drain.
 #[account]
 pub struct FilteredTerms {
     pub model: Address,
