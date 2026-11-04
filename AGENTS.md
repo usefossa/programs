@@ -1,26 +1,31 @@
 # programs
 
-on-chain anchor v2 programs: `router/src/lib.rs` and `dex/src/lib.rs`; typed account state: `router/src/state_types.rs` and `dex/src/state_types.rs`; active receipt implementation: `router/src/receipt.rs`. `ops/` contains program upgrade tooling.
+## scope
+
+- `router/`: inference router. entrypoint: `router/src/lib.rs`; typed state: `router/src/state_types.rs`; receipt implementation: `router/src/receipt.rs`.
+- `dex/`: exchange. entrypoint: `dex/src/lib.rs`; typed state: `dex/src/state_types.rs`.
+- `ops/`: explicit program inspection and upgrade tooling.
+- `tests/vm/`: shared transaction tests. see [protocol documentation](https://fossa.ag/docs/technical).
 
 ## workflow
 
-- read relevant implementation before editing. ask when unsure; keep changes concise and latency first.
-- no commits, pushes, documentation files, programs, or subagents unless requested. quick edits end without automatic checks.
-- never publish packages without an explicit request.
-- no browser screenshots. prose and comments lowercase; preserve normal casing in identifiers, commands, urls, and user-facing text.
-- deployment, upgrades, onboarding, signing, and fund movement require explicit authorization. repository maintenance does not authorize on-chain operations.
-- preserve local configuration, encrypted signer records, keys, build artifacts, and test ledgers. never commit credentials, private state, or generated artifacts.
+- read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
+- deployment, upgrades, onboarding, signing, fund movement, and package publication require explicit authorization. repository maintenance alone grants none.
+- preserve local configuration, encrypted signer records, keys, build artifacts, and test ledgers.
 
-## protocol principles
+## implementation
+
+### protocol principles
 
 - keep inference direct between client and provider, with replaceable application infrastructure.
-- minimize integration work without inflating compute, cost, or latency; favor reusable setup and concise implementations.
-- provider identity and offers come from on-chain state and authorized metadata updates.
+- minimize integration work without inflating compute units, cost, or latency. favor reusable setup and concise implementations.
+- derive provider identities and offers from on-chain state and authorized metadata updates.
 - evaluate provider effort, infrastructure burden, trust, spent fees, refundable rent, compute, latency, and throughput separately.
 - account layouts and instruction encodings have external consumers. coordinate changes with affected integrations.
 - distinguish protocol rules, client behavior, and verified deployments. local measurements do not establish mainnet performance.
+- keep readmes to documentation links: one properly capitalized link per component, each on its own line. public documentation explains contract rules and trust boundaries without private operational details.
 
-## program structure
+### program structure
 
 - follow the existing anchor v2 architecture in both programs. keep `#[program]` entrypoints in `lib.rs` as thin, typed calls into instruction handlers; keep related business logic together in the existing instruction modules.
 - define instruction arguments in `args.rs` with `AnchorSerialize`, `AnchorDeserialize` and `IdlType`. define named account fields in `state_types.rs` with `#[account]` and the existing `PodU*`/`PodI*` types. use normal generated discriminators and serialization rather than custom opcode tables, byte offsets or wire codecs.
@@ -33,21 +38,30 @@ on-chain anchor v2 programs: `router/src/lib.rs` and `dex/src/lib.rs`; typed acc
 - use named `RouterError`/`DexError` variants and small domain helpers. keep integer accounting, rounding, slippage, authorization and replay checks explicit. add abstractions for repeated domain operations rather than building another account, serialization or dispatch framework.
 - optimize measured hot paths within this structure. retain readable typed code and validation; justify lower-level replacements with representative sbf measurements. use git history for retired implementations rather than restoring duplicate source trees or compatibility layers without an integration requirement.
 
-## configuration
+## configuration and security
 
 - on-chain code reads accounts and instruction data, never off-chain configuration.
-- upgrade operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; paths inside config resolve relative to that file. use standard solana json keypairs. commands plan/inspect by default; `--execute` enables writes.
-- examples contain placeholders only; do not point verification at live operator credentials. keep signer files outside git; preserve upgrade buffer keypairs for recovery.
+- never log or commit credentials, signer bytes, private state, or generated artifacts. examples contain placeholders only; never point ordinary verification at live operator credentials.
+- operator examples live in `ops/config.example.toml`. pass `--config <path>` or `FOSSA_CONFIG`; configured paths resolve relative to that file. use standard Solana JSON keypairs and keep them outside git.
+- operator commands plan or inspect by default; only explicit `--execute` enables writes. preserve upgrade buffer keypairs for recovery.
 - `FOSSA_SBF` optionally overrides the built program artifact.
-- use bun for javascript/typescript dependencies. python uses uv, httpx, and loguru.
 
-## verification and releases
+## verification
 
-- requested commit/push requires relevant checks and one final diff review. install ops dependencies with `cd ops && bun install --frozen-lockfile`; root `bun run test` runs offline program/ops unit tests. ops typecheck: `cd ops && bun run check`.
-- direct rust checks: `cargo test --manifest-path router/Cargo.toml --locked`; build the on-chain artifacts with `cargo build-sbf --manifest-path router/Cargo.toml -- --locked` and `cargo build-sbf --manifest-path dex/Cargo.toml -- --locked`.
-- on-chain behavior changes use `bun run test:vm`, which builds both sbf artifacts and runs the shared litesvm suite in `tests/vm/`. use generated anchor clients, synthetic keys and spl fixture helpers, following `tests/vm/src/tests.rs`.
-- the vm harness requires host rust 1.97.1 or newer; select a compatible installed toolchain without changing the sbf platform tools.
-- keep pure arithmetic/matching tests beside their implementation and transaction tests in the shared vm suite. add focused success and rejection cases for changed behavior, asserting relevant balances and state. extend existing fixtures; avoid duplicate harnesses and unrelated test matrices. keep regression coverage when restructuring code.
-- identify instruction, account layout and pda changes separately from business-rule changes. coordinate affected consumers and migration needs; compilation or a small vm suite alone does not establish migration compatibility, full behavioral parity or unchanged cu usage.
-- ops tests must not read operator configuration or real signer files, access live rpc, or broadcast transactions. use temporary fixtures and synthetic keys for offline signing checks.
-- bump program and ops semver together for source/ops changes. commits use `[fix]`, `[feat]`, `[add]`, or `[update]`, with a short lowercase single line and no attribution. tag requested releases `vX.Y.Z`.
+- before a requested commit or push, run relevant checks and review the final diff. root `bun run test` runs offline router, DEX, and ops unit tests. ops setup: `cd ops && bun install --frozen-lockfile`; typecheck: `cd ops && bun run check`.
+- direct Rust checks: `cargo test --manifest-path router/Cargo.toml --locked` and `cargo test --manifest-path dex/Cargo.toml --locked`.
+- build on-chain artifacts with `cargo build-sbf --manifest-path router/Cargo.toml -- --locked` and `cargo build-sbf --manifest-path dex/Cargo.toml -- --locked`.
+- on-chain behavior changes require `bun run test:vm`, which builds both SBF artifacts and runs `tests/vm/`. use generated Anchor clients, synthetic keys, and SPL fixture helpers from `tests/vm/src/tests.rs`.
+- the VM harness requires host Rust 1.97.1 or newer. select a compatible host toolchain without changing SBF platform tools.
+- keep pure arithmetic and matching tests beside their implementation; keep transaction tests in the shared VM suite. extend existing fixtures and cover changed success/rejection behavior with relevant balance and state assertions. preserve regression coverage when restructuring.
+- identify instruction, account-layout, and PDA changes separately from business-rule changes. compilation or a small VM suite alone does not establish migration compatibility, full behavioral parity, or unchanged compute-unit usage.
+- ops tests must not read operator configuration or real signer files, access live RPC, or broadcast transactions. use temporary fixtures and synthetic keys for offline signing checks.
+
+## commits and releases
+
+- create commits and push only when explicitly requested.
+- use `[type] short description`; allowed types are `[fix]`, `[feat]`, `[add]`, and `[update]`.
+- messages must be one lowercase line. combine multiple changes with `+`.
+- never add attribution or `co-authored-by` trailers.
+- bump affected versions with semver for behavior or release changes. tag requested releases `vX.Y.Z`.
+- bump affected program and ops versions together for source or ops changes.
