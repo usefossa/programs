@@ -32,7 +32,7 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
     oracle::accumulate(&mut pool_state, oracle::timestamp(&clock)?)?;
     token::account(user_a, false)?;
     token::account(user_b, false)?;
-    let total = add(
+    let mut total = add(
         lp(lp_mint, authority.address())?,
         pool_state.locked_lp.get(),
     )?;
@@ -80,6 +80,14 @@ pub(crate) fn liquidity(accounts: &mut Liquidity, args: LiquidityArgs, remove: b
         pool_state.reserve_a = sub(pool_state.reserve_a.get(), x)?.into();
         pool_state.reserve_b = sub(pool_state.reserve_b.get(), y)?.into();
     } else {
+        if total == 0 && pool_state.reserve_a.get() > 0 && pool_state.reserve_b.get() > 0 {
+            // externally burned receipts leave reserves owned by permanent, unminted shares.
+            total = sqrt(
+                u128::from(pool_state.reserve_a.get()) * u128::from(pool_state.reserve_b.get()),
+            );
+            pool_state.locked_lp = total.into();
+        }
+        add(total, amount)?;
         // requested lp stays exact, including an empty direct pool's initial deposits.
         let (x, y, gx, gy) = if total == 0 {
             check(

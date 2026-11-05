@@ -7,6 +7,9 @@ const SUPPLY: u64 = 1_000_000_000;
 #[path = "dex_compute.rs"]
 mod compute;
 
+#[path = "dex_liquidity.rs"]
+mod liquidity;
+
 fn now(svm: &LiteSVM) -> u64 {
     svm.get_sysvar::<solana_clock::Clock>().unix_timestamp as u64
 }
