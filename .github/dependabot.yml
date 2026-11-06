@@ -9,12 +9,3 @@ updates:
       security:
         applies-to: security-updates
         patterns: ["*"]
-  - package-ecosystem: bun
-    directory: /ops
-    schedule: {interval: weekly}
-    open-pull-requests-limit: 0
-    labels: [security]
-    groups:
-      security:
-        applies-to: security-updates
-        patterns: ["*"]
