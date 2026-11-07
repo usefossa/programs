@@ -434,7 +434,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fossa-dex"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "inference-router-program"
-version = "0.18.4"
+version = "0.18.5"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
