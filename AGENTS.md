@@ -9,6 +9,7 @@
 
 ## workflow
 
+- dependency updates and security fixes are manual; retain vulnerability alerts and dependency inventories.
 - read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
 - deployment, upgrades, onboarding, signing, fund movement, and package publication require explicit authorization. repository maintenance alone grants none.
 - preserve local configuration, encrypted signer records, keys, build artifacts, and test ledgers.
