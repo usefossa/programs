@@ -13,6 +13,7 @@
 - read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
 - deployment, upgrades, onboarding, signing, fund movement, and package publication require explicit authorization. repository maintenance alone grants none.
 - preserve local configuration, encrypted signer records, keys, build artifacts, and test ledgers.
+- deployment verification rebuilds the source commit recorded in `builds/dex-mainnet.json`, not the current branch tip. after an authorized dex upgrade, update that record with the exact source commit, lockfile hash, build settings, and deployed artifact digest.
 
 ## implementation
 

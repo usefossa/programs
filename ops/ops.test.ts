@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,6 +17,7 @@ import {
   type ElfSectionHeader,
 } from "./formats";
 import { authority, deployed, deployArgs, extension, LOADER, upgrade, validateElf } from "./upgrade";
+import { checkArtifact, checkProgramData } from "./verify-dex";
 
 const directories: string[] = [];
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -282,4 +284,43 @@ test("upgrade refuses missing signer and non-ELF artifact before execution", asy
   const { config, path, rpc } = upgradeFixture();
   await expect(upgrade(config, true, rpc, path)).rejects.toThrow();
   writeFileSync(path, "invalid"); await expect(upgrade(config, false, rpc, path)).rejects.toThrow("ELF");
+});
+
+test("deployment verification rejects a changed build even when its ELF remains valid", () => {
+  const artifact = elf(), expected = { filename: "program.so", bytes: artifact.length, sha256: createHash("sha256").update(artifact).digest("hex") };
+  expect(checkArtifact(artifact, expected)).toBe(expected.sha256);
+  const changed = Buffer.from(artifact); changed[120]! ^= 1;
+  expect(() => checkArtifact(changed, expected)).toThrow("differs");
+  expect(() => checkArtifact(Buffer.from("not an ELF"), expected)).toThrow("ELF");
+});
+
+test("deployment verification accepts exact bytes with zero allocation padding and either authority state", () => {
+  for (const hasAuthority of [0, 1]) {
+    const artifact = elf(), data = account(programData(artifact, provider, 128, hasAuthority), LOADER);
+    data.data.writeBigUInt64LE(123n, 4);
+    expect(checkProgramData(artifact, data)).toBe(123n);
+  }
+});
+
+test("deployment verification rejects changed or truncated executable bytes and nonzero trailing data", () => {
+  const artifact = elf();
+  for (const change of [
+    (data: Buffer) => { data[LOADER_PROGRAM_DATA_CODEC.fixedSize + 120]! ^= 1; return data; },
+    (data: Buffer) => data.subarray(0, LOADER_PROGRAM_DATA_CODEC.fixedSize + artifact.length - 1),
+    (data: Buffer) => { data[data.length - 1] = 1; return data; },
+  ]) {
+    const data = account(change(programData(artifact, provider, 16)), LOADER);
+    expect(() => checkProgramData(artifact, data)).toThrow("differs");
+  }
+});
+
+test("deployment verification rejects invalid loader accounts before comparing bytes", () => {
+  const artifact = elf(), data = account(programData(artifact), LOADER);
+  for (const invalid of [null, { ...data, owner: provider }, { ...data, executable: true }, { ...data, data: Buffer.alloc(10) }]) {
+    expect(() => checkProgramData(artifact, invalid)).toThrow("Invalid");
+  }
+  for (const [offset, value] of [[0, 2], [12, 2]]) {
+    const changed = Buffer.from(data.data); changed[offset!] = value!;
+    expect(() => checkProgramData(artifact, { ...data, data: changed })).toThrow("state");
+  }
 });
