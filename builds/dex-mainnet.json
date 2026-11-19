@@ -1,0 +1,21 @@
+{
+  "programId": "dexXxx8t1AZqsAZ3dLdMcfvF3mMeEGBdbEPjAYXy5n9",
+  "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+  "source": {
+    "repository": "https://github.com/usefossa/programs.git",
+    "commit": "844f87606474fe222557de8f75d524ea8041e504",
+    "manifest": "dex/Cargo.toml",
+    "lockfile": "dex/Cargo.lock",
+    "lockfileSha256": "fdcacbd6cf7df43e0f4d625e6035e35cd59fa3dc63631ccc8555d1b418e93ff4"
+  },
+  "build": {
+    "solanaVersion": "3.1.11",
+    "platformToolsVersion": "v1.52",
+    "architecture": "v0"
+  },
+  "artifact": {
+    "filename": "fossa_dex.so",
+    "bytes": 398936,
+    "sha256": "c3ba314799246cc9527e0f232cbb5d12782cbb13b630ced2203a82a2a17f66eb"
+  }
+}
